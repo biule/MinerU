@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mission: Understand MinerU 4.x end-to-end to extend it — MinerU 4.1</title>
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="index.html">首页</a>
+  <a href="index.html#lessons">课程</a>
+  <a href="reference/study-plan.html">学习路线</a>
+  <a href="reference/faq.html">常见问题</a>
+  <a href="reference/architecture-map.html">架构地图</a>
+  <a href="reference/tier-matrix.html">档位矩阵</a>
+  <a href="reference/glossary.html">术语表</a>
+  <a href="reference/commands.html">命令速查</a>
+  <a href="MISSION.html">使命</a>
+  <a href="RESOURCES.html">资源</a>
+  <a href="NOTES.html">笔记</a>
+  <a href="learning-records/index.html">学习记录</a>
+</nav>
+
+<p class="eyebrow">Teaching workspace · Mission</p>
+<h1>Mission: Understand MinerU 4.x end-to-end to extend it</h1>
+<h2>Why</h2>
+<p class="lede">You maintain a fork of MinerU (<code>biule/MinerU</code>) and need to change its parsing pipeline, tier policy, model backends, and services with confidence — not just run it. Architecture knowledge is the prerequisite for shipping a custom capability without breaking existing behavior.</p>
+<h2>Success looks like</h2>
+<ul>
+<li>Trace any input file from CLI/SDK/API to <code>MiddleJson</code>, naming every decision point and module.</li>
+<li>Explain and choose among <code>flash/basic/standard/advanced</code>, including model engines and hardware constraints.</li>
+<li>Locate the exact seam for a change: PDF stage, model backend, renderer, Doclib endpoint, or service.</li>
+<li>Explain the VLM runtime: engine selection, cache key, remote <code>http-client</code>, lifecycle, and no-fallback semantics.</li>
+<li>Build a batch pipeline that chooses tiers, parses, extracts fields, isolates failures, and packages assets.</li>
+<li>Deploy and debug the stateless API, Doclib, Router, and VLM service from source-level knowledge.</li>
+<li>Prove a finetune or quantized model is better with a fixed A/B protocol, per-type metrics, and a rollback plan.</li>
+<li>Read a failing parse log and identify which stage, window, engine, or model produced it.</li>
+</ul>
+<h2>Constraints</h2>
+<ul>
+<li>Windows 11; conda environment <code>mineru</code> (Python 3.12); CPU-first, optional GPU.</li>
+<li>Chinese explanations preferred; source-level accuracy over marketing summaries.</li>
+<li>Learns by reading code, diagrams, and printable references.</li>
+<li>GitHub access is intermittent through a local proxy; lessons must not depend on live fetching.</li>
+<li><code>docs/tech/teach-old/</code> is a 3.x-era archive: useful for teaching structure and application scenarios, not a factual source for 4.x APIs.</li>
+</ul>
+<h2>Out of scope</h2>
+<ul>
+<li>Training-framework internals and large-scale distributed training (serving and evaluating finetunes is in scope).</li>
+<li>DocVortex internals beyond its public boundary (for now).</li>
+<li>Cloud SaaS billing and operations.</li>
+</ul>
+
+<p class="footer">MinerU 4.1.7 · 教学文档 · <a href="MISSION.md">Markdown 源</a> · <a href="index.html">课程目录</a></p>
+
+</div>
+</body>
+</html>

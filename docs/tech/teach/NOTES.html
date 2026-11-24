@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teaching Notes — MinerU 4.1</title>
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="index.html">首页</a>
+  <a href="index.html#lessons">课程</a>
+  <a href="reference/study-plan.html">学习路线</a>
+  <a href="reference/faq.html">常见问题</a>
+  <a href="reference/architecture-map.html">架构地图</a>
+  <a href="reference/tier-matrix.html">档位矩阵</a>
+  <a href="reference/glossary.html">术语表</a>
+  <a href="reference/commands.html">命令速查</a>
+  <a href="MISSION.html">使命</a>
+  <a href="RESOURCES.html">资源</a>
+  <a href="NOTES.html">笔记</a>
+  <a href="learning-records/index.html">学习记录</a>
+</nav>
+
+<p class="eyebrow">Teaching workspace · Notes</p>
+<h1>Teaching Notes</h1>
+<h2>User preferences</h2>
+<ul>
+<li><strong>Language</strong>: Chinese explanations; keep technical identifiers and source paths in English.</li>
+<li><strong>Depth</strong>: source-level accuracy. Prefer reading real code over marketing or blog summaries.</li>
+<li><strong>Format</strong>: step-by-step; detailed flowcharts; rigorous comments on code snippets.</li>
+<li><strong>Reference style</strong>: printable, Tufte-like HTML; cheat sheets should be reusable across sessions.</li>
+<li><strong>Location</strong>: teaching workspace lives under <code>docs/tech/teach/</code> so it stays alongside the project's other engineering docs and does not pollute the repository root.</li>
+</ul>
+<h2>Working environment</h2>
+<ul>
+<li>Windows 11, Git Bash.</li>
+<li>Conda environment <code>mineru</code> (Python 3.12.16), MinerU 4.1.7 installed editable from this repository.</li>
+<li>GPU optional; CPU-first assumptions for lessons.</li>
+<li>GitHub network is intermittent through a local proxy. Lessons must work fully offline (no CDN dependencies, no live fetches required).</li>
+<li>Markdown documents (<code>MISSION.md</code>, <code>RESOURCES.md</code>, <code>NOTES.md</code>, learning records) are rendered to styled HTML with <code>python docs/tech/teach/build_md_html.py</code>; edit the <code>.md</code> source, then rerun the script.</li>
+</ul>
+<h2>Teaching approach</h2>
+<ul>
+<li>Start from the mission: be able to extend the fork safely.</li>
+<li>Use the repository's own <code>docs/next/</code> and source as the primary sources.</li>
+<li>One tightly-scoped lesson at a time; retrieval practice (quizzes) before moving on.</li>
+<li>Reference documents carry the compressed, printable knowledge; lessons carry the skill.</li>
+<li>Record genuine understanding in <code>learning-records/</code>, not mere coverage.</li>
+<li>Keep the 3.x archive (<code>docs/tech/teach-old/</code>) for teaching structure and application framing only; verify every API fact against 4.1.7 source.</li>
+<li>Course shape: mainline 01–09 → model runtime 13 → application 14–15 → finetune 10–12 + acceptance 16 → operations 17. Use <code>reference/study-plan.html</code> for routes and evidence standards.</li>
+</ul>
+<h2>Session log</h2>
+<ul>
+<li>2026-11-07: Workspace created. Initial course starts with tracing a PDF and choosing a tier.</li>
+<li>2026-11-24: Compared with the 3.x archive and expanded the course to 17 lessons. Added model runtime/VLM engine (13), batch pipeline and field extraction (14), small-image OCR extension (15), finetune evaluation and quantization (16), deployment and operations (17), plus <code>reference/study-plan.html</code> and <code>reference/faq.html</code>. Fixed error-schema and quiz defects found during the review. All quizzes remain unattempted; no new competency evidence yet.</li>
+</ul>
+
+<p class="footer">MinerU 4.1.7 · 教学文档 · <a href="NOTES.md">Markdown 源</a> · <a href="index.html">课程目录</a></p>
+
+</div>
+</body>
+</html>

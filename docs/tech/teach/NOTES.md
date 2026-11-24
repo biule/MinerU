@@ -14,6 +14,7 @@
 - Conda environment `mineru` (Python 3.12.16), MinerU 4.1.7 installed editable from this repository.
 - GPU optional; CPU-first assumptions for lessons.
 - GitHub network is intermittent through a local proxy. Lessons must work fully offline (no CDN dependencies, no live fetches required).
+- Markdown documents (`MISSION.md`, `RESOURCES.md`, `NOTES.md`, learning records) are rendered to styled HTML with `python docs/tech/teach/build_md_html.py`; edit the `.md` source, then rerun the script.
 
 ## Teaching approach
 

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learning record: 3.x archive gap analysis and course expansion — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="../index.html">首页</a>
+  <a href="../index.html#lessons">课程</a>
+  <a href="index.html">学习记录</a>
+  <a href="../reference/study-plan.html">学习路线</a>
+  <a href="../reference/faq.html">常见问题</a>
+  <a href="../MISSION.html">使命</a>
+  <a href="../RESOURCES.html">资源</a>
+  <a href="../NOTES.html">笔记</a>
+</nav>
+
+<p class="eyebrow">Teaching workspace · Learning record</p>
+<h1>Learning record: 3.x archive gap analysis and course expansion</h1>
+<p class="lede">On 2026-11-24 the 3.x archive (<code>docs/tech/teach-old/</code>, 15 lessons) was compared with the 4.1.7 workspace (12 lessons). The archive's APIs and engine names are obsolete, but four teaching directions were worth importing:</p>
+<ol>
+<li><strong>Stage-based curriculum</strong> — foundation → practice → source/debug → extension → finetune → production. Adopted as <code>reference/study-plan.html</code> (8 stages, 3 target routes, per-lesson evidence standards).</li>
+<li><strong>Application focus</strong> — invoice parsing, batch pipeline, output field extraction, CSV summary. Adopted as lesson 14.</li>
+<li><strong>Deep VLM/engine debugging</strong> — call chain, engine selection, lifecycle, failure triage. Adopted as lesson 13; the archive's 3.x backend names were replaced with 4.x <code>tier</code> / <code>small backend</code> / <code>VLM engine</code>.</li>
+<li><strong>Full finetune-to-production lifecycle</strong> — the 4.1.7 course stopped at serving; added evaluation + quantization (lesson 16) and deployment/operations (lesson 17). The archive's small-image OCR bypass was re-verified against 4.x <code>AtomModelSingleton</code> and adopted as lesson 15.</li>
+</ol>
+<p>Also added <code>reference/faq.html</code> for high-frequency phenomena, and corrected defects found during the comparison:</p>
+<ul>
+<li>Lesson 09 claimed public errors include <code>type/retryable/user_action</code>; <code>docs/next/api/responses.md</code> and <code>mineru/tasks/contracts.py</code> show only <code>code/message/param</code>. Fixed.</li>
+<li>Lesson 07 had nonsensical quiz options for the upload method (now <code>PUT</code>) and Tasks output formats (now <code>EPUB</code> as the unsupported one).</li>
+<li>Lessons 01/02/03/04/08/09/11/12 used translated or garbled quiz answers where exact identifiers matter; normalized to <code>flash/basic/standard/advanced</code>, <code>medium/high/xhigh</code>, <code>Content List</code>, <code>DocVortex</code>, <code>HTML</code>, error codes, etc.</li>
+<li>Lesson 12 had typos (<code>comm</code>, <code>rar</code>, <code>vfs</code>) and literal backticks; fixed.</li>
+</ul>
+<p><strong>Status</strong>: 17 lessons authored/cross-linked. All quizzes remain unattempted; no new competency evidence beyond LR-0001/LR-0002. The next session should collect evidence for lessons 13–17 (engine triage, batch output, small-image comparison, A/B report, deployment runbook) before writing a competency record.</p>
+
+<p class="footer">MinerU 4.1.7 · 教学文档 · <a href="0003-course-expansion-gap-analysis.md">Markdown 源</a> · <a href="../index.html">课程目录</a></p>
+
+</div>
+</body>
+</html>

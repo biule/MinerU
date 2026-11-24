@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MinerU Teaching Resources — MinerU 4.1</title>
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="index.html">首页</a>
+  <a href="index.html#lessons">课程</a>
+  <a href="reference/study-plan.html">学习路线</a>
+  <a href="reference/faq.html">常见问题</a>
+  <a href="reference/architecture-map.html">架构地图</a>
+  <a href="reference/tier-matrix.html">档位矩阵</a>
+  <a href="reference/glossary.html">术语表</a>
+  <a href="reference/commands.html">命令速查</a>
+  <a href="MISSION.html">使命</a>
+  <a href="RESOURCES.html">资源</a>
+  <a href="NOTES.html">笔记</a>
+  <a href="learning-records/index.html">学习记录</a>
+</nav>
+
+<p class="eyebrow">Teaching workspace · Resources</p>
+<h1>MinerU Teaching Resources</h1>
+<blockquote><p>Version baseline: MinerU 4.1.7 (repository <code>master</code>). Prefer the repository's own docs and source over external summaries.</p></blockquote>
+<h2>Knowledge</h2>
+<ul>
+<li><a href="../../next/architecture.md">Internal doc: <code>docs/next/architecture.md</code></a> The authoritative short description of current call relationships and ownership boundaries. Use for: DocVortex vs MinerU split, service responsibilities, local document-library chain.</li>
+<li><a href="../../next/code-map.md">Internal doc: <code>docs/next/code-map.md</code></a> Module-to-responsibility map and the two main call chains. Use for: orienting a change to the right package.</li>
+<li><a href="../../next/tiers.md">Internal doc: <code>docs/next/tiers.md</code></a> Tier/effort semantics, per-entry default selection, service tier ceilings, and fallback rules. Use for: any "which tier?" or "why did it choose this tier?" question.</li>
+<li><a href="../../next/workflows.md">Internal doc: <code>docs/next/workflows.md</code></a> End-to-end workflows for stateless parsing, HTTP Tasks, Doclib, scan/watch, and rendering. Use for: entry-point behaviour and lifecycle.</li>
+<li><a href="../../next/config.md">Internal doc: <code>docs/next/config.md</code></a> Two-phase configuration model, precedence, runtime KV keys, remote VLM, LLM-aided postprocess. Use for: configuration and deployment questions.</li>
+<li><a href="../../next/invariants.md">Internal doc: <code>docs/next/invariants.md</code></a> Non-negotiable implementation invariants (privacy, ownership, protocol, locators). Use for: judging whether a proposed change is safe.</li>
+<li><a href="../../next/pitfalls.md">Internal doc: <code>docs/next/pitfalls.md</code></a> Current 4.1 traps: per-entry default tiers, backend vs tier, compatibility boundary, error/cancel semantics. Use for: avoiding 3.x habits.</li>
+<li><a href="../../next/model-assets.md">Internal doc: <code>docs/next/model-assets.md</code></a> Model repos, required files, GGUF main/mmproj, backend selection, offline runs. Use for: engine/weights/deployment questions.</li>
+<li><a href="../../next/cli/">Internal docs: <code>docs/next/cli/</code></a> <code>mineru-kit api-server</code>, <code>vlm-server</code>, <code>router</code>, <code>models</code>, <code>mineru server</code>, <code>mineru parse/read</code>. Use for: exact options and lifecycle.</li>
+<li><a href="../../next/api/">Internal docs: <code>docs/next/api/</code></a> Tasks endpoints, responses/errors, Router admin, health/models/tiers. Use for: protocol-level integrations.</li>
+<li><a href="../../next/sdk/parser.md">Internal SDK docs: <code>docs/next/sdk/parser.md</code></a> and <a href="../../next/sdk/parse-result.md"><code>parse-result.md</code></a> Public SDK contract for <code>parse()</code> / <code>MinerUParser</code> / <code>ParseResult</code>. Use for: API-level questions and examples.</li>
+<li><a href="../../../mineru/parser/">Source: <code>mineru/parser/</code></a> Input preparation, tier mapping, page ranges, local/remote parser facades. Use for: what happens before analysis.</li>
+<li><a href="../../../mineru/backend/analyze.py">Source: <code>mineru/backend/analyze.py</code></a> The unified analysis facade and <code>ModelJson</code> construction. Use for: routing and metadata questions.</li>
+<li><a href="../../../mineru/backend/analysis/pdf/">Source: <code>mineru/backend/analysis/pdf/</code></a> PDF window orchestration, layout, native text, OCR, formulas, tables, inline recognition. Use for: the core inference pipeline.</li>
+<li><a href="../../../mineru/model/">Source: <code>mineru/model/</code></a> Model assets, runtime selection, device policy, VLM engines, local model lifecycle. Use for: engine and hardware questions.</li>
+<li><a href="../../../mineru/render/">Source: <code>mineru/render/</code></a> Nine render targets and option contracts. Use for: output-format changes.</li>
+<li><a href="../../../mineru/doclib/">Source: <code>mineru/doclib/</code></a> Stateful library: SQLite, ingest, queue, execution, content read, locators, background workers. Use for: caching, reading, and library services.</li>
+<li><a href="../../../mineru/tasks/">Source: <code>mineru/tasks/</code></a> and <a href="../../../mineru/kit/"><code>mineru/kit/</code></a> HTTP task protocol, Router, file-parse wrapper, Gradio UI. Use for: service integration.</li>
+<li><a href="../../../CLAUDE.md">Project constraints: <code>CLAUDE.md</code></a> Import rules, lazy loading, determinism, DocVortex boundary, lint/format policy. Use for: making changes that fit the codebase.</li>
+<li><a href="../teach-old/">3.x course archive: <code>docs/tech/teach-old/</code></a> Previous 15-lesson course (MinerU 3.x). Use for: teaching structure, application scenarios, and finetune/evaluation/deployment framing. Do not use its APIs or engine names as 4.x facts.</li>
+<li><a href="../../../README_zh-CN.md">User-facing README (Chinese)</a> Tiers, model-engine matrix, install paths, agent guidance. Use for: product-level framing and tier trade-offs.</li>
+<li><a href="https://opendatalab.github.io/MinerU/">Official documentation</a> Published user docs (quick start, usage, reference, migration). Use for: stable public behaviour.</li>
+<li><a href="https://github.com/myhloli/docvortex">DocVortex repository</a> The shared document layer. Use for: native-format parsers, schema, deterministic postprocess, generic renderers. Do not read its private internals for MinerU product questions.</li>
+<li><a href="https://github.com/opendatalab/OmniDocBench">OmniDocBench</a> Standard document-parsing benchmark. Use for: general regression comparisons; not a substitute for your business target set.</li>
+<li><a href="https://docs.vllm.ai/en/stable/serving/openai_compatible_server/">vLLM OpenAI-compatible server</a> Serving and quantization options for remote VLM. Use for: deployment and quantized-model acceptance.</li>
+<li><a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a> <code>convert_hf_to_gguf.py</code> and <code>llama-quantize</code> for GGUF main/mmproj. Use for: local llama.cpp deployment.</li>
+<li><a href="https://github.com/opendatalab/MinerU">MinerU GitHub repository</a> Issues, discussions, release notes. Use for: known bugs, migrations, and design context.</li>
+</ul>
+<h2>Wisdom (Communities)</h2>
+<ul>
+<li><a href="https://github.com/opendatalab/MinerU/discussions">GitHub Discussions — opendatalab/MinerU</a> High-signal venue for tier trade-offs, deployment questions, and quality comparisons. Use for: questions that need practitioner experience.</li>
+<li><a href="https://github.com/opendatalab/MinerU/issues">GitHub Issues — opendatalab/MinerU</a> Bug reports and reproduction cases. Search before filing; include version, hardware, tier, and logs.</li>
+<li><a href="https://discord.gg/Tdedn9GTXq">Discord — MinerU</a> Real-time community chat. Use for: quick troubleshooting and deployment experience. Ask before joining.</li>
+<li><a href="https://mineru.net/community-portal/">ModelScope community portal</a> Chinese-language community portal. Use for: model and deployment discussions in Chinese.</li>
+</ul>
+<h2>Gaps</h2>
+<ul>
+<li>No official deep-dive on the PDF processing-window orchestration or inline-formula VLM fallback; the source and <code>docs/next/tiers.md</code> are the authority.</li>
+<li>Router internals (worker discovery, leases) have no standalone doc; read <code>mineru/kit/router/</code>.</li>
+<li>No in-repo training or evaluation harness; lesson 16 provides a minimal A/B skeleton, but production metrics (TEDS, business field F1) need external tooling.</li>
+<li>DocVortex's internal implementation is out of scope until the public boundary is insufficient.</li>
+</ul>
+
+<p class="footer">MinerU 4.1.7 · 教学文档 · <a href="RESOURCES.md">Markdown 源</a> · <a href="index.html">课程目录</a></p>
+
+</div>
+</body>
+</html>
