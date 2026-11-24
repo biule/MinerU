@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 12：服务化微调模型 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0011-build-finetune-dataset.html">← 课程 11</a>
+  <a href="../index.html">课程目录</a>
+  <a href="0013-model-runtime-and-vlm-engine.html">课程 13 →</a>
+  <a href="../reference/commands.html">命令速查</a>
+  <a href="../reference/glossary.html">术语表</a>
+  <a href="../reference/tier-matrix.html">档位矩阵</a>
+</nav>
+
+<p class="eyebrow">Lesson 12 · 微调系列 3/3</p>
+<h1>服务化微调模型：接回推理链路</h1>
+<p class="lede">这节课只做一件事：把训练完的权重按三条路径之一接入 MinerU（远程 vLLM 服务 / 本地引擎权重 / llama.cpp GGUF），并用一次真实 standard 解析验证端到端生效。</p>
+
+<div class="callout">
+  <strong>验收原则：</strong>接入成功的唯一标准是“MinerU 解析某文档，输出确实体现了你的微调效果”——而不是“服务启动了”。每条路径的验证步骤都以端到端解析收尾。
+</div>
+
+<h2 id="pathmap">1. 路径回顾与选择</h2>
+
+<div class="flow-h">
+  <div class="node accent"><strong>A 远程 vLLM</strong>首选 · 多机可复用<br>改动最小 · 只改配置</div>
+  <div class="node"><strong>B 本地引擎权重</strong>单机 · 免服务<br>vLLM/LMDeploy 直接加载本地目录</div>
+  <div class="node"><strong>C GGUF + llama.cpp</strong>CPU 友好 · 需要转换<br>主模型 + mmproj 两文件</div>
+</div>
+
+<h2 id="path-a">2. 路径 A：远程 vLLM 服务（推荐）</h2>
+
+<h3 id="a1">2.1 起服务</h3>
+<pre><code># 在 GPU 机器上（或本机）起 vLLM OpenAI 服务
+# MinerU 4.x 官方路径：vllm serve <模型目录>
+vllm serve /path/to/your-finetuned-model \
+  --served-model-name mineru-vlm-finetuned \
+  --port 30000
+
+# 健康验证（两个端点都必须可用，MinerU 会调用 /v1/models 做模型名发现）
+curl http://127.0.0.1:30000/v1/models</code></pre>
+
+<h3 id="a2">2.2 接入 MinerU</h3>
+<pre><code># config.yaml
+model:
+  vlm:
+    server_url: http://127.0.0.1:30000/v1    # 保留代理前缀；会自动去尾部 /v1
+    api_key: ${VLM_API_KEY:-}                # 可为空
+    model: mineru-vlm-finetuned              # 上游只有一个模型时可留空
+    http_timeout: 600
+    max_concurrency: 100                     # VLM 请求并发</code></pre>
+
+<h3 id="a3">2.3 端到端验证</h3>
+<pre><code>mineru-kit parse 你的样例.pdf -o out.md --tier standard
+# 命中标志：vLLM 服务日志里出现 chat completion 请求
+# 且 out.md 的内容体现微调改进（如领域表格结构、专有符号）
+
+# 若想同时对照基线，起两个端口分别在配置间切换解析</code></pre>
+<p class="small muted">依据：<code>mineru/model/vlm/client.py</code>——<code>server_url</code> 非空即 <code>http-client</code>；<code>settings.validate_environment()</code> 会校验 URL 形态；远程模式不回退本地引擎。</p>
+
+<h2 id="path-b">3. 路径 B：本地引擎加载微调权重</h2>
+<ul>
+  <li><strong>vLLM/LMDeploy/MLX</strong>：<code>_create_model</code> 在 <code>model_path</code> 为空时会 <code>MINERU_2_5_PRO_2605_1_2B.ensure()</code> 下载官方权重；把 <code>model.source</code> 设为 <code>local</code>、并按 <code>ModelRepo</code> 目录布局放入微调权重即可替换。</li>
+  <li>目录约定在 <code>model/registry.py</code> 的 <code>ModelRepo</code>（HuggingFace/ModelScope 同名仓库布局）。</li>
+  <li>引擎选择：auto 按 <code>resolve_vlm_engine()</code>；显式指定用 <code>model.vlm.engine: vllm / lmdeploy</code>。</li>
+</ul>
+<pre><code># 本机 GPU 直跑（无独立服务进程）：
+model:
+  vlm:
+    engine: vllm        # 或 lmdeploy
+# 权重位置：按 ModelRepo 布局放入 model.base_dir（默认 ~/.mineru/models）</code></pre>
+
+<h2 id="path-c">4. 路径 C：GGUF + llama.cpp</h2>
+<pre><code># llama.cpp 后端需要两个文件（model/registry.py 的 GGUF 仓库约定）：
+#   MinerU2.5-Pro-2605-1.2B-Q8_0.gguf        ← 主模型（你的微调权重须转换）
+#   mmproj-MinerU2.5-Pro-2605-1.2B-Q8_0.gguf  ← 多模态投影（视觉侧mmproj）
+
+# 转换流程（在 llama.cpp 工具链内，非本仓库）：
+# 1) 微调权重 → f16 GGUF（convert_hf_to_gguf.py）
+# 2) 量化到 Q8_0（llama-quantize）
+# 3) 视觉投影 mmproj 沿用官方文件（若视觉塔未动）</code></pre>
+<ul>
+  <li>接入点：<code>_create_model</code> 的 <code>llama-cpp-engine</code> 分支——按 <code>repo.paths["main"]</code> 与 <code>repo.paths["mmproj"]</code> 从模型目录取两文件。</li>
+  <li>设备：CPU 自动 <code>n_gpu_layers=0</code>；有 GPU 时 llama.cpp 会尝试 offload（<code>resolve_llama_device</code>）。</li>
+  <li><strong>注意</strong>：mmproj 与主模型 必须 匹配（同一次训练产出的视觉塔 + 语言塔组合），不匹配会导致乱码或静默错误。</li>
+</ul>
+
+<h2 id="verify">5. 三条路径的验证清单</h2>
+<table>
+  <thead><tr><th>#</th><th>检查</th><th>方法</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>模型被加载的是<strong>你的权重</strong></td><td>远程：查 <code>/v1/models</code> 名称；本地：日志 backend + loading 路径；GGUF：文件路径</td></tr>
+    <tr><td>2</td><td>MinerU 的请求真的带到了它</td><td>服务侧日志出现请求；或解析输出体现微调改进</td></tr>
+    <tr><td>3</td><td>档位仍选 standard</td><td>flash/basic 根本不调用 VLM——用 <code>--tier standard</code></td></tr>
+    <tr><td>4</td><td>并发配置生效</td><td><code>max_concurrency</code> 是 VLM 请求并发，与解析任务并发独立</td></tr>
+    <tr><td>5</td><td>无静默回退</td><td>远程模式的回退不存在；本地引擎失败会报错不是换模型</td></tr>
+  </tbody>
+</table>
+
+<h2 id="quiz">6. 检索练习</h2>
+
+<div class="quiz" data-explanation="flash 与 basic 不调用 VLM；只有 standard/advanced 会走到你接入的模型。">
+  <h3>Q1. 验证微调模型必须用哪个档位？</h3>
+  <button class="quiz-option">flash</button>
+  <button class="quiz-option">basic</button>
+  <button class="quiz-option" data-correct="true">standard</button>
+  <button class="quiz-option">advanced</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="GGUF 仓库约定两个文件：main 主模型 + mmproj 多模态投影，二者必须配对。">
+  <h3>Q2. llama.cpp 路径需要几个文件？</h3>
+  <button class="quiz-option">一个文件</button>
+  <button class="quiz-option" data-correct="true">两个文件</button>
+  <button class="quiz-option">三个文件</button>
+  <button class="quiz-option">四个文件</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="settings.model 为空时要求上游 /v1/models 恰好包含一个模型；多模型服务必须显式写 model 名。">
+  <h3>Q3. 上游有多个模型时，配置里的 model 字段？</h3>
+  <button class="quiz-option">可以留空</button>
+  <button class="quiz-option">任意填写</button>
+  <button class="quiz-option" data-correct="true">必须指定</button>
+  <button class="quiz-option">自动轮换</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="远程模式不会自动回退本地引擎；vlm 的 server_url 非空即 http-client，失败直接报错。">
+  <h3>Q4. 远程模型服务宕机时，MinerU 会？</h3>
+  <button class="quiz-option">换本地引擎</button>
+  <button class="quiz-option">降为 flash</button>
+  <button class="quiz-option" data-correct="true">直接报错</button>
+  <button class="quiz-option">等待重试</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">7. 动手练习（你的环境）</h2>
+<ol>
+  <li><strong>不用真微调也能走全流程</strong>：用官方 <code>MinerU2.5-Pro-2605-1.2B</code> 权重起一个 vLLM 服务（路径 A），把 <code>server_url</code> 指向它，解析一份 PDF——先确认链路通，权重换成微调版时只改一行。</li>
+  <li>观察服务日志中的请求形态：每个 chat completion 的文本应以 <code>\nText Recognition:</code> 等开头——这正是课程 11 捕获的 prompt。</li>
+  <li>若手上有微调权重：按路径 B 或 C 替换，并用课程 09 的错误码矩阵排障。</li>
+</ol>
+<p class="small muted">遇到 <code>invalid_api_key</code> / 上游 401：确认 server_url 与 api_key 匹配；连接被拒：确认端口与防火墙。</p>
+
+<h2 id="source">8. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../next/config.md">docs/next/config.md</a> 的「远程 VLM」节与 "<a href="../../../../mineru/model/vlm/runtime.py">runtime.py</a>" 的 <code>_create_model</code>——三条路径事实来源。</li>
+  <li>配合阅读：<a href="../../../../mineru/model/registry.py">model/registry.py</a>（GGUF 仓库布局）、<a href="../reference/tier-matrix.html">档位矩阵</a>（哪些档位会调用 VLM）。</li>
+</ul>
+
+<div class="callout">
+  <strong>微调系列毕业标准：</strong>① 能说出模型在推理链路中的调用点；② 能用捕获脚本产出 (image, prompt, completion) 样本；③ 至少沿一条路径把一个非官方权重接入并完成端到端 standard 解析。做到后进入 <a href="0016-finetune-evaluation-and-quantization.html">课程 16 · 微调验收</a>，用 A/B 证明它真的更好；运行时细节回到 <a href="0013-model-runtime-and-vlm-engine.html">课程 13</a>。告诉教师（agent）你的结果，会写入 learning-record。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 12 · 参考：<a href="../reference/commands.html">命令速查</a> · <a href="../reference/glossary.html">术语表</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

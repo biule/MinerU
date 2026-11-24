@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考：术语表 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="../lessons/0001-trace-a-pdf.html">← 课程 01</a>
+  <a href="../lessons/0002-choose-the-right-tier.html">课程 02</a>
+  <a href="architecture-map.html">架构地图</a>
+  <a href="tier-matrix.html">档位矩阵</a>
+  <a href="commands.html">命令速查</a>
+</nav>
+
+<p class="eyebrow">Reference · Glossary</p>
+<h1>术语表</h1>
+<p class="lede">MinerU 4.x 的稳定术语。后续课程与参考文档统一使用这些定义。</p>
+
+<table>
+  <thead><tr><th style="width:22%">术语</th><th>含义</th><th style="width:24%">源码 / 依据</th></tr></thead>
+  <tbody>
+    <tr id="tier"><td><strong>tier</strong></td><td>产品档位：<code>flash</code> / <code>basic</code> / <code>standard</code> / <code>advanced</code>。决定解析质量和资源取舍。</td><td><code>mineru/types.py</code></td></tr>
+    <tr id="effort"><td><strong>effort</strong></td><td>内部分析强度：<code>flash</code> / <code>medium</code> / <code>high</code> / <code>xhigh</code>。由 tier 显式映射。</td><td><code>mineru/parser/tier.py</code></td></tr>
+    <tr id="small-backend"><td><strong>small backend</strong></td><td>小模型执行后端：ONNX 或 Torch。影响依赖、设备和模型文件。</td><td><code>model/runtime/device.py</code></td></tr>
+    <tr id="vlm-engine"><td><strong>VLM engine</strong></td><td>视觉语言模型推理引擎：llama.cpp、vLLM、LMDeploy、MLX；配置了远程地址时改用 HTTP 客户端。</td><td><code>model/vlm/selector.py</code></td></tr>
+    <tr id="model-json"><td><strong>ModelJson</strong></td><td>内部原始分析结果：raw pages + <code>page_index_map</code> + metadata + extensions。不进入公开结果包。</td><td><a href="../../../next/glossary.md">docs/next/glossary.md</a></td></tr>
+    <tr id="middle-json"><td><strong>MiddleJson</strong></td><td>公开的有序页面语义树，schema 身份 <code>docvortex.middle</code>、版本 <code>2.0</code>。</td><td><a href="../../../next/middle-json/README.md">docs/next/middle-json/</a></td></tr>
+    <tr id="parse-result"><td><strong>ParseResult</strong></td><td>SDK 结果对象，唯一字段是 <code>middle_json</code>；提供渲染、序列化、保存。不持有 PDF 对象。</td><td><code>mineru/parser/base.py</code></td></tr>
+    <tr id="doclib"><td><strong>Doclib</strong></td><td>本地有状态文档库：入库、缓存、搜索、扫描、按 locator 读取。</td><td><code>mineru/doclib/</code></td></tr>
+    <tr id="short-id"><td><strong>short_id</strong></td><td>Doclib 的短文档标识，用于 locator；不同于 Tasks 的 <code>file_id</code>。</td><td><code>doclib/locators.py</code></td></tr>
+    <tr id="task"><td><strong>Task</strong></td><td>HTTP 父任务与有序 files 清单；每个文件独立执行、独立完成。</td><td><code>mineru/tasks/</code></td></tr>
+    <tr id="file-id"><td><strong>file_id</strong></td><td>Tasks 从创建到成功产物保持的公共逐文件 ID；不透明，不推导存储路径。</td><td><a href="../../../next/api/README.md">docs/next/api/</a></td></tr>
+    <tr id="locator"><td><strong>locator</strong></td><td>文档/档位/页/块/字符定位表达式：<code>doc:{short_id}/tier:{tier}/page:{n}/block:{n}/char:{offset}</code>。</td><td><code>doclib/locators.py</code></td></tr>
+    <tr id="page-idx"><td><strong>page_idx / page_no</strong></td><td>内部从 0 开始的页面索引 / 面向用户从 1 开始的页码。</td><td><a href="../../../next/page-naming.md">docs/next/page-naming.md</a></td></tr>
+    <tr id="page-range"><td><strong>page_range</strong></td><td>PDF 页范围字符串：<code>1-5,8</code>、<code>r3-r1</code>（从末尾计）、<code>all</code>。仅 PDF 支持。</td><td><a href="../../../next/page-ranges.md">docs/next/page-ranges.md</a></td></tr>
+    <tr id="window"><td><strong>window</strong></td><td>PDF 处理窗口，默认 64 页；控制单文档内存上界。</td><td><code>backend/analysis/pdf/window.py</code></td></tr>
+    <tr id="managed"><td><strong>managed / self_hosted / remote</strong></td><td>Doclib 的三种质量解析来源：托管本地服务 / 自托管服务 / 远端服务。</td><td><a href="../../../next/config.md">docs/next/config.md</a></td></tr>
+    <tr id="runtime-owner"><td><strong>RuntimeOwner</strong></td><td>运行时资源所有者，用于显式获取/释放模型与服务资源，避免泄漏。</td><td><code>model/runtime/ownership.py</code></td></tr>
+    <tr id="docvortex"><td><strong>DocVortex</strong></td><td>共享文档层：原生格式解析、PDF 访问与分类、schema、确定性后处理、七种通用 renderer、export。</td><td><a href="../../../../CLAUDE.md">CLAUDE.md</a></td></tr>
+    <tr id="fts"><td><strong>FTS</strong></td><td>SQLite 全文搜索：<code>fts_contents</code>（正文）与 <code>fts_filenames</code>（文件名）。</td><td><code>doclib/core/fts.py</code></td></tr>
+    <tr id="structured-content"><td><strong>Structured Content</strong></td><td>派生的内容字典，没有独立 schema 身份；不是 MiddleJson 协议。</td><td><code>mineru/render/structured_content.py</code></td></tr>
+    <tr id="content-list"><td><strong>Content List V1 / V2</strong></td><td>MinerU 专属的扁平/按页内容列表输出；与通用 renderer 分开维护。</td><td><code>mineru/render/content_list*.py</code></td></tr>
+    <tr id="parse-record"><td><strong>parse record</strong></td><td>Doclib 持久化的解析批次；状态与缓存语义独立于 HTTP Task。</td><td><code>doclib/types.py</code></td></tr>
+    <tr id="layout"><td><strong>layout</strong></td><td>页面级版面分析：给出标题、正文、表格、图片、公式等块的 label/bbox/score 与阅读顺序。</td><td><code>model/layout/</code></td></tr>
+    <tr id="ocr-det-rec"><td><strong>OCR det / rec</strong></td><td>文字检测（找框）与文字识别（读字）；MinerU 4.x 使用 PP-OCRv6 Tiny Det + Small Rec，Torch/ONNX 共用字符表。</td><td><code>model/ocr/</code></td></tr>
+    <tr id="mfr"><td><strong>MFR</strong></td><td>数学公式识别（Math Formula Recognition）；输出 LaTeX。basic 跑完整 MFR，standard/advanced 主要走 VLM 并对失败切片局部回退。</td><td><code>model/mfr/</code></td></tr>
+    <tr id="table-rec"><td><strong>table rec</strong></td><td>表格结构识别：无线表（SlanetPlus）与有线表（UNet）等；与表格方向/类型分类配合。</td><td><code>model/table/</code></td></tr>
+    <tr id="seal-ocr"><td><strong>seal OCR</strong></td><td>印章识别：独立检测阈值、多边形后处理与裁剪；语言模式 <code>seal</code>，不是普通 OCR 的隐式降级。</td><td><code>model/ocr/pytorch_paddle.py</code></td></tr>
+    <tr id="atom-model"><td><strong>atom model</strong></td><td>本地小模型的原子实例（layout/OCR/MFR/表格等）；由 <code>AtomModelSingleton</code> 按后端、设备、语言与参数缓存。</td><td><code>model/runtime/hybrid.py</code></td></tr>
+    <tr id="hybrid-context"><td><strong>Hybrid local context</strong></td><td>窗口准备/收尾持有小模型集合与设备锁的上下文；VLM 推理期间释放锁。</td><td><code>HybridLocalModelContextSingleton</code></td></tr>
+    <tr id="vlm-predictor"><td><strong>VLM predictor</strong></td><td>窗口依赖的最小抽取协议：带布局抽取、两步抽取、文本切片识别及异步版本。</td><td><code>model/vlm/contracts.py</code></td></tr>
+    <tr id="http-client"><td><strong>http-client</strong></td><td><code>model.vlm.server_url</code> 非空时的远程 VLM 后端；OpenAI 兼容，不加载本地引擎，失败不回退。</td><td><code>model/vlm/client.py</code></td></tr>
+    <tr id="gguf"><td><strong>GGUF / mmproj</strong></td><td>llama.cpp 的主模型文件与多模态投影文件；两者必须配对，官方仓库使用 Q8_0。</td><td><code>model/registry.py</code></td></tr>
+    <tr id="lora"><td><strong>LoRA / adapter</strong></td><td>低秩适配器：只训练少量附加权重；部署前通常 merge 回基座。训练在外部完成，MinerU 只消费结果。</td><td>外部训练框架</td></tr>
+    <tr id="cer"><td><strong>CER</strong></td><td>字符错误率：编辑距离 / 参考长度；评测文本时需先固定归一化规则。</td><td>评测脚本（课程 16）</td></tr>
+    <tr id="teds"><td><strong>TEDS</strong></td><td>表格结构相似度指标（外部实现）；也可用单元格 F1 / 结构精确匹配替代。</td><td>外部评测</td></tr>
+    <tr id="parse-batch"><td><strong>parse batch</strong></td><td>Doclib 的解析批次；按页范围与档位记录状态、错误与产物，不等同于 HTTP 父任务。</td><td><code>doclib/services/parse_queue_svc.py</code></td></tr>
+    <tr id="server-tier"><td><strong>server tier</strong></td><td>服务部署的能力上限（<code>--tier</code>），包含较低档位；不是单次请求档位。</td><td><a href="../../../next/cli/mineru-kit-api-server.md">api-server</a></td></tr>
+    <tr id="content-list-bbox"><td><strong>Content List bbox</strong></td><td>Content List 输出的 0–1000 整数框；MiddleJson 是 0–1，OCR 原子模型是输入图像像素。</td><td><code>render/_internal/content_list/</code></td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>3.x 术语避坑：</strong>旧课程里的 <code>pipeline</code> / <code>vlm-engine</code> / <code>hybrid-engine</code> 是 3.x 的后端名称，不是 4.x 的产品概念。4.x 用 <strong>tier</strong>（flash/basic/standard/advanced）表达质量，用 <strong>small backend</strong>（ONNX/Torch）与 <strong>VLM engine</strong>（llama.cpp/vLLM/LMDeploy/MLX）表达实现。看到旧文章时先做这个映射，不要把旧名当参数传。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 参考文档 · 术语以本表为准；发现冲突请向教师（agent）反馈。</p>
+
+</div>
+</body>
+</html>

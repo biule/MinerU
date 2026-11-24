@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 05：Doclib 状态线 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0004-results-and-rendering.html">← 课程 04</a>
+  <a href="0006-config-and-privacy.html">课程 06 →</a>
+  <a href="../reference/architecture-map.html">架构地图</a>
+  <a href="../reference/commands.html">命令速查</a>
+  <a href="../reference/glossary.html">术语表</a>
+</nav>
+
+<p class="eyebrow">Lesson 05 · 状态</p>
+<h1>Doclib 状态线：缓存、排队与读取</h1>
+<p class="lede">这节课只做一件事：能解释“mineru parse 第二次为什么快”——按页缓存怎么算覆盖、批次怎么复用、读取为什么不会触发新解析。</p>
+
+<div class="callout">
+  <strong>为什么学这个：</strong>Doclib 是 Agent 阅读体验的核心。缓存覆盖算法和“读取不建解析”的两条不变量，决定了任何 Doclib 改动的安全边界。
+</div>
+
+<h2 id="identity">1. 路径与内容身份</h2>
+<ul>
+  <li><strong>路径</strong>（file）是实例，可有状态：<code>active / deleted / unreachable</code>。</li>
+  <li><strong>sha256</strong>（doc）是内容身份；多个路径可指向同一内容。</li>
+  <li>解析缓存按 <code>sha256 + tier + 页范围</code> 组织；<code>forget</code> 移除记录不删源文件。</li>
+</ul>
+
+<h2 id="queue">2. 排队算法：按页去重</h2>
+<pre><code># doclib/services/parse_queue_svc.py —— request_parse 核心步骤
+
+# 1) 先刷新路径，确保 files.sha256 对应当前内容
+refreshed = await self.ingest_svc.refresh_file(path, ensure_ingested=True, allow_images=True)
+
+# 2) tier 在缓存检查前确定
+if ext in TIERED_PARSE_EXTENSIONS:
+    requested_tier = tier or parse_policy.resolve_default_tier(health=self.health, remote=remote)
+else:
+    requested_tier = "flash"
+
+# 3) 默认页范围：已知页数取前 10 页；未知取第 1 页
+request_page_range = expand_page_range(
+    page_range or parse_policy.default_parse_range(page_count), page_count or 1)
+needed = parse_page_range_set(request_page_range)
+
+# 4) 已完成且可读的批次覆盖的页，直接扣除 → 纯缓存命中
+if not force:
+    for batch in valid_done_batches:
+        needed -= parse_page_range_set(batch["page_range"])
+    if not needed:
+        return _done_response(...)   # status = done
+
+# 5) 排队/解析中批次覆盖的页：复用 + 把优先级提到 1，不新建
+if batch["id"] in reused_parse_ids and batch["priority"] < 1:
+    await self.db.execute("UPDATE parses SET priority=1 ...")
+
+# 6) 仍缺的页创建新批次（priority=1，前台请求高优先级）</code></pre>
+
+<div class="flow">
+  <div class="node dark"><strong>请求</strong>path + tier + pages</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>刷新与校验</strong>文本文件 → parse_not_required；非 PDF 页范围 → 报错</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>缓存检查</strong>done 批次扣页 → 全覆盖则 done</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>活动批次复用</strong>parsing/pending 扣页 → 提升优先级</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>新批次</strong>只解析缺失页（priority=1）</div>
+</div>
+
+<h2 id="force">3. force / invalidate / forget</h2>
+<table>
+  <thead><tr><th>操作</th><th>作用</th><th>不做什么</th></tr></thead>
+  <tbody>
+    <tr><td><code>--force</code></td><td>本次请求跳过 done 缓存</td><td>不删除、不作废旧结果</td></tr>
+    <tr><td><code>invalidate</code></td><td>未来解析与读取避开旧缓存</td><td>不自动触发新解析</td></tr>
+    <tr><td><code>forget</code></td><td>移除文件记录与缓存</td><td>不删源文件；可能被 watch 重新发现</td></tr>
+  </tbody>
+</table>
+
+<h2 id="execution">4. 执行状态机</h2>
+<pre><code># doclib/background/parse_worker.py + parse_execution_svc.py
+# worker 循环：acquire_task → process_doc → done/failed
+
+async def process_doc(self, task):
+    # 抢占校验：状态必须仍是 parsing（丢失锁的批次直接放弃）
+    if current["status"] != PARSE_STATUS_PARSING:
+        return False
+
+    if tier == "flash":
+        result = await self._parse_via_local(...)      # 本地 parse()，跑在线程里
+    else:
+        result, via = await self._parse_via_api(...)   # managed / self_hosted / remote</code></pre>
+<ul>
+  <li>启动时清理崩溃遗留：<code>parsing → failed</code>、释放锁。</li>
+  <li>任何失败都会写 <code>error_code/error_msg</code> 并释放锁。</li>
+  <li>取消后迟到的结果<strong>不能改写终态</strong>。</li>
+</ul>
+
+<h2 id="read">5. 读取：locator 与续读</h2>
+<pre><code>doc:{short_id}                                    # 自动选最高已缓存档位
+doc:{short_id}/tier:{tier}
+doc:{short_id}/tier:{tier}/page:{page_no}         # 页码 1 起
+doc:{short_id}/tier:{tier}/page:{page_no}/block:{block_no}
+doc:{short_id}/tier:{tier}/page:{page_no}/block:{block_no}/char:{offset}  # 0 起</code></pre>
+<ul>
+  <li><strong>读取不会触发新的质量解析</strong>；没有缓存时返回错误（如 <code>tier_not_cached</code>）。</li>
+  <li><code>--context N</code>：页 locator 取上下 N 页；块 locator 取上下 N 块。</li>
+  <li><code>--limit</code> 是软字符预算；超限时输出带续读游标（<code>next_request.after</code>）。</li>
+  <li>markdown 按读取需要从缓存 MiddleJson 现场渲染；缓存里存的是 JSON 与素材，不是 markdown。</li>
+</ul>
+
+<h2 id="quiz">6. 检索练习</h2>
+
+<div class="quiz" data-explanation="Doclib 用内容 sha256 作为文档身份；多个路径可以对应同一内容。">
+  <h3>Q1. Doclib 的文档身份基于？</h3>
+  <button class="quiz-option">路径名</button>
+  <button class="quiz-option">文件名</button>
+  <button class="quiz-option" data-correct="true">内容哈希</button>
+  <button class="quiz-option">修改时间</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="PDF（已知页数）的默认解析范围是前 10 页；未指定页范围时由 parse_policy.default_parse_range 决定。">
+  <h3>Q2. Doclib 主动解析 PDF 的默认页范围是？</h3>
+  <button class="quiz-option">第一页</button>
+  <button class="quiz-option">前三页</button>
+  <button class="quiz-option" data-correct="true">前十页</button>
+  <button class="quiz-option">整本书</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="force 只让本次请求跳过 done 缓存；要影响未来请求需要 invalidate。">
+  <h3>Q3. <code>--force</code> 会删除或作废旧缓存吗？</h3>
+  <button class="quiz-option">会删除</button>
+  <button class="quiz-option">会作废</button>
+  <button class="quiz-option" data-correct="true">都不会</button>
+  <button class="quiz-option">只删除</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="缓存里存 MiddleJson 与素材，markdown 在读取时现场渲染，服务于 locator 与续读。">
+  <h3>Q4. Doclib 缓存里存的是？</h3>
+  <button class="quiz-option">渲染文本</button>
+  <button class="quiz-option">网页快照</button>
+  <button class="quiz-option">原始字节</button>
+  <button class="quiz-option" data-correct="true">语义协议</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">7. 源码练习</h2>
+<ol>
+  <li>在 <code>doclib/services/parse_policy.py</code> 找到 <code>default_parse_range</code>，说出“未知页数”时返回什么。</li>
+  <li>在 <code>doclib/services/parse_execution_svc.py</code> 找到 <code>_resolve_api_target</code>：远端不可达且回退本地也失败时抛什么错误码？</li>
+  <li>在 <code>doclib/client.py</code> 找到显式 <code>base_url</code>/<code>socket_path</code> 时的 token 要求，解释为什么默认发现不需要显式 token。</li>
+</ol>
+
+<h2 id="source">8. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../next/workflows.md">docs/next/workflows.md</a> — Doclib 链路与各入口边界。</li>
+  <li>配合阅读：<a href="../../../../mineru/doclib/services/parse_queue_svc.py">parse_queue_svc.py</a>（覆盖算法）、<a href="../../../../mineru/doclib/services/content_read_svc.py">content_read_svc.py</a>（读取与续读）。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0006-config-and-privacy.html">课程 06 · 配置与隐私边界</a>。缓存行为有疑问时，问教师（agent）并贴出 <code>request_parse</code> 中的相关行。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 05 · 参考：<a href="../reference/commands.html">命令速查</a> · <a href="../reference/architecture-map.html">架构地图</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

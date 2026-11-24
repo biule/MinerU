@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 07：HTTP 服务与 Router — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0006-config-and-privacy.html">← 课程 06</a>
+  <a href="0008-extend-safely.html">课程 08 →</a>
+  <a href="../reference/commands.html">命令速查</a>
+  <a href="../reference/architecture-map.html">架构地图</a>
+  <a href="../reference/glossary.html">术语表</a>
+</nav>
+
+<p class="eyebrow">Lesson 07 · 服务</p>
+<h1>HTTP 服务与 Router</h1>
+<p class="lede">这节课只做一件事：能走完一条 Tasks 生命周期（创建 → 上传 → 执行 → 下载 → 取消），并说出 file-parse、WebUI、Router 各自的存在理由。</p>
+
+<div class="callout">
+  <strong>为什么学这个：</strong>服务化是 fork 的常见扩展方向。Tasks 的“逐文件独立完成”和“ID 不透明”两条规则，是最容易被破坏的契约。
+</div>
+
+<h2 id="tasks">1. Tasks 协议</h2>
+<table>
+  <thead><tr><th>Method</th><th>Path</th><th>用途</th></tr></thead>
+  <tbody>
+    <tr><td><code>POST</code></td><td><code>/v1/tasks</code></td><td>JSON files 清单创建任务；返回缺失文件的上传链接（202）</td></tr>
+    <tr><td><code>PUT</code></td><td>返回的上传链接</td><td>每个链接上传一个文件；没有 complete 请求</td></tr>
+    <tr><td><code>GET</code></td><td><code>/v1/tasks/{task_id}</code></td><td>总状态 + 逐文件状态 + 成功文件的结果链接</td></tr>
+    <tr><td><code>POST</code></td><td><code>/v1/tasks/{task_id}/cancel</code></td><td>取消未完成文件；成功文件保留产物</td></tr>
+    <tr><td><code>GET</code></td><td><code>/v1/files/{file_id}/content</code></td><td>下载结果（default/docx/html/latex）</td></tr>
+    <tr><td><code>GET</code></td><td><code>/v1/health · /v1/models · /v1/tiers</code></td><td>能力发现（免鉴权）</td></tr>
+  </tbody>
+</table>
+
+<h2 id="file-state">2. 逐文件状态机</h2>
+
+<div class="flow">
+  <div class="node dark"><strong>waiting-file</strong>等待上传</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>pending</strong>上传完成，等待执行</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>running</strong>解析执行中</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>completed / failed / canceled</strong>终态</div>
+</div>
+
+<ul>
+  <li>就绪文件<strong>独立执行</strong>，不等其他文件上传。</li>
+  <li>单文件 <code>completed</code> 即可下载其结果，<strong>不要求父任务终结</strong>。</li>
+  <li>父任务状态是聚合：全部成功 <code>completed</code>；部分成功 <code>partial</code>；出现取消 <code>canceled</code>。</li>
+  <li>取消后迟到的结果不能改成成功。</li>
+</ul>
+
+<h2 id="ids">3. 资源与 ID</h2>
+<ul>
+  <li><code>task</code> 聚合逐文件状态；<code>file</code> 是源文件视图或解析产物。</li>
+  <li>ID 是 OpenAI 风格前缀 + 随机串（如 <code>file-r9NS…</code>）；<strong>不透明</strong>，客户端不得从中推断时间、租户或存储路径。</li>
+  <li>Router 场景下公共 <code>file_id</code> 与 worker 内部 ID 可以不同，不由客户端推导。</li>
+  <li>认证：配置了 API Key 后，除 health/models/tiers 外均需 <code>Authorization: Bearer …</code>；未配置时本地允许匿名。</li>
+</ul>
+
+<h2 id="outputs">4. 输出打包</h2>
+<pre><code># parser/task_outputs.py —— 每个输入只发布一个完整可下载文件
+formats = default / docx / html / latex
+
+default → markdown.md + middle_json.json + structured_content.json
+docx    → document.docx（单格式时直接返回该文件）
+html    → document.html（图片内嵌）
+latex   → document.tex
+多格式  → result.zip（default/latex 附 images/ 目录）</code></pre>
+
+<h2 id="siblings">5. 兄弟服务</h2>
+<table>
+  <thead><tr><th>服务</th><th>入口</th><th>存在理由</th></tr></thead>
+  <tbody>
+    <tr><td>file-parse</td><td><code>mineru-kit file-parse-server</code></td><td>单文件 multipart 直传 + 同步等待 + 请求 ID 恢复；超时返回 202</td></tr>
+    <tr><td>WebUI</td><td><code>mineru-kit webui</code></td><td>Gradio 界面；未指定 api-url 时托管本地 V1 API</td></tr>
+    <tr><td>Router</td><td><code>mineru-kit router</code></td><td>worker 发现/认证/调度、公共 ID 映射、源缓存与结果租约；对外仍是 Tasks 协议</td></tr>
+  </tbody>
+</table>
+<p class="small">file-parse 先持久化源文件与 <code>request_id</code>，再创建/上传/等待上游 Tasks；等待超时可继续查询；客户端断连不自动取消。</p>
+
+<h2 id="quiz">6. 检索练习</h2>
+
+<div class="quiz" data-explanation="父任务状态是逐文件聚合：部分成功记 partial，客户端不必等父任务终结。">
+  <h3>Q1. 部分文件成功、部分失败时，父任务状态是？</h3>
+  <button class="quiz-option">已成功</button>
+  <button class="quiz-option">部分取消</button>
+  <button class="quiz-option" data-correct="true">部分完成</button>
+  <button class="quiz-option">处理之中</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="上传链接由创建响应给出，每个链接对应一个文件，使用 PUT 上传字节；没有 complete 请求。">
+  <h3>Q2. 文件字节通过什么方法交给服务端？</h3>
+  <button class="quiz-option">POST</button>
+  <button class="quiz-option" data-correct="true">PUT</button>
+  <button class="quiz-option">DELETE</button>
+  <button class="quiz-option">PATCH</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="Tasks 支持 default/docx/html/latex 四种输出；EPUB 不在 Tasks 输出协议内。">
+  <h3>Q3. Tasks 不支持哪种输出格式？</h3>
+  <button class="quiz-option">default</button>
+  <button class="quiz-option">DOCX</button>
+  <button class="quiz-option">HTML</button>
+  <button class="quiz-option" data-correct="true">EPUB</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="file-parse 用 request_id 持久化上游引用；等待超时返回 202，可继续查询或恢复。">
+  <h3>Q4. file-parse 等待超时后客户端应？</h3>
+  <button class="quiz-option">重新上传</button>
+  <button class="quiz-option">直接放弃</button>
+  <button class="quiz-option" data-correct="true">继续查询</button>
+  <button class="quiz-option">换用远端</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">7. 源码练习</h2>
+<ol>
+  <li>在 <code>mineru/tasks/http.py</code> 找到四个路由函数，说出创建任务的成功状态码。</li>
+  <li>在 <code>mineru/tasks/service.py</code> 找到 <code>resolve_task_tier</code>，说出“只有 Advanced 可用”时的选择结果。</li>
+  <li>在 <code>mineru/parser/api_server.py</code> 找到健康检查免鉴权的端点列表。</li>
+</ol>
+<p class="small muted">核对：任务 1 期望 <code>202</code>；任务 2 会选中 <code>advanced</code>。</p>
+
+<h2 id="source">8. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../next/api/README.md">docs/next/api/README.md</a> — 端点地图、资源模型、认证与错误约定。</li>
+  <li>配合阅读：<a href="../../../../mineru/tasks/http.py">tasks/http.py</a>、<a href="../../../../mineru/parser/task_backend.py">parser/task_backend.py</a>（Tasks 与文件存储的适配）。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0008-extend-safely.html">课程 08 · 安全扩展清单</a>。HTTP 行为细节可直接问教师（agent）。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 07 · 参考：<a href="../reference/commands.html">命令速查</a> · <a href="../reference/glossary.html">术语表</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

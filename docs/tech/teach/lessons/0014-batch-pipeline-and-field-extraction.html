@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 14：批量流水线与字段提取 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0013-model-runtime-and-vlm-engine.html">← 课程 13</a>
+  <a href="0015-small-image-ocr-extension.html">课程 15 →</a>
+  <a href="../index.html">课程目录</a>
+  <a href="../reference/commands.html">命令速查</a>
+  <a href="../reference/glossary.html">术语表</a>
+</nav>
+
+<p class="eyebrow">Lesson 14 · 落地</p>
+<h1>批量流水线与字段提取</h1>
+<p class="lede">这节课只做一件事：把前十三课的源码知识组装成一条可运行的批处理流水线——目录输入、按类型选档、批量解析、结果落盘、字段抽取、CSV 汇总，并且单文件失败不拖垮整批。</p>
+
+<div class="callout">
+  <strong>为什么学这个：</strong>这是从“会调用 API”到“能交付解析结果”的分界线。真实业务里 90% 的工作不是解析一次，而是稳定地解析一千次。
+</div>
+
+<h2 id="outcome">你将能够</h2>
+<ul>
+  <li>设计六阶段流水线，并把每一步映射到 MinerU 4.x 的真实入口。</li>
+  <li>按文件类型、扫描/文本、页范围选择档位，而不是一律用默认值。</li>
+  <li>正确读取 <code>ParseResult</code> 的三种视图，并解释 Content List 的坐标约定。</li>
+  <li>用关键词、bbox、表格 HTML 三种模式抽取业务字段。</li>
+  <li>处理并发、重试、幂等、隐私与结果包素材，避免生产事故。</li>
+</ul>
+
+<h2 id="stages">1. 六阶段流水线</h2>
+
+<div class="flow-h">
+  <div class="node"><strong>1 收集</strong>目录 / 数据库 / 对象存储</div>
+  <div class="arrow-h"></div>
+  <div class="node"><strong>2 分类</strong>PDF / 图片 / 原生格式</div>
+  <div class="arrow-h"></div>
+  <div class="node accent"><strong>3 策略</strong>tier · ocr_mode · 页范围</div>
+  <div class="arrow-h"></div>
+  <div class="node"><strong>4 解析</strong><code>MinerUParser.parse()</code></div>
+  <div class="arrow-h"></div>
+  <div class="node"><strong>5 抽取</strong>Content List / MiddleJson</div>
+  <div class="arrow-h"></div>
+  <div class="node dark"><strong>6 汇总</strong>CSV / 数据库 / 报告</div>
+</div>
+
+<table>
+  <thead><tr><th>阶段</th><th>本课做法</th><th>生产扩展</th></tr></thead>
+  <tbody>
+    <tr><td>收集</td><td><code>Path.iterdir()</code> 过滤后缀</td><td>递归、S3、消息队列</td></tr>
+    <tr><td>分类</td><td>后缀 + <code>ocr_mode="auto"</code></td><td>预分类以省钱/省时</td></tr>
+    <tr><td>策略</td><td>原生格式 <code>flash</code>，PDF/图片 <code>standard</code></td><td>按业务质量等级分档</td></tr>
+    <tr><td>解析</td><td>一个 tier 一个 <code>MinerUParser</code></td><td>远程 VLM / Tasks 服务</td></tr>
+    <tr><td>抽取</td><td>Content List V1 扁平列表</td><td>V2 按页、结构化字段模型</td></tr>
+    <tr><td>汇总</td><td>CSV（<code>utf-8-sig</code>）</td><td>数据库、人工复核队列</td></tr>
+  </tbody>
+</table>
+
+<h2 id="classify">2. 先分类，再选策略</h2>
+<table>
+  <thead><tr><th>输入</th><th>建议档位</th><th>原因</th></tr></thead>
+  <tbody>
+    <tr><td>文本型 PDF（Word 导出）</td><td><code>flash</code> 或 <code>basic</code></td><td>原生文本可用；先预览，必要时升级</td></tr>
+    <tr><td>扫描型 PDF / 图片</td><td><code>standard</code></td><td>需要 OCR + 版面 + VLM 抽取</td></tr>
+    <tr><td>复杂表格 / 公式 / 难版面</td><td><code>advanced</code></td><td>两步抽取 + 图片分析</td></tr>
+    <tr><td>Office / HTML / EPUB / OFD / CSV</td><td><code>flash</code></td><td>原生格式只有 flash；CLI 单文件显式质量档位会报错，SDK/批量归一为 flash</td></tr>
+  </tbody>
+</table>
+<pre><code>NATIVE_SUFFIXES = {
+    "docx", "pptx", "xlsx", "odt", "odp", "ods", "rtf",
+    "epub", "ofd", "html", "mhtml", "csv", "tsv",
+}
+IMAGE_SUFFIXES = {"png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"}
+
+def choose_tier(path: Path) -> str:
+    suffix = path.suffix.lower().lstrip(".")
+    if suffix in NATIVE_SUFFIXES:
+        return "flash"
+    if suffix in IMAGE_SUFFIXES:
+        return "standard"          # 图片先转 PDF，再走同一条 PDF 流水线
+    return "standard"              # PDF 默认标准档</code></pre>
+<ul>
+  <li><code>ocr_mode="auto"</code> 由 PDF 分类决定 txt/ocr；显式 <code>txt</code>/<code>ocr</code> 不会追加回退。</li>
+  <li><code>page_range</code> 只对 PDF 合法；非 PDF 传非空值会报 <code>page_range_invalid</code>。</li>
+  <li>先用 <code>flash</code> 试读首页、再升级，是控制成本的常用策略；但不要在 CLI 单文件入口对原生格式请求质量档位。</li>
+</ul>
+
+<h2 id="script">3. 最小可运行脚本</h2>
+<pre><code>"""批量解析目录，保存结果包并输出 summary.csv。"""
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import traceback
+from pathlib import Path
+
+from mineru.parser import MinerUParser
+from mineru.parser.writer import FileBasedDataWriter
+from mineru.render import RenderFormat, render
+
+IN_ROOT = Path("demo/pdfs")
+OUT_ROOT = Path("pipeline_output")
+RESULTS = OUT_ROOT / "results"
+MANIFEST = OUT_ROOT / "manifest.jsonl"
+
+NATIVE_SUFFIXES = {
+    "docx", "pptx", "xlsx", "odt", "odp", "ods", "rtf",
+    "epub", "ofd", "html", "mhtml", "csv", "tsv",
+}
+IMAGE_SUFFIXES = {"png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"}
+
+
+def collect(root: Path) -> list[Path]:
+    supported = NATIVE_SUFFIXES | IMAGE_SUFFIXES | {"pdf"}
+    return sorted(p for p in root.iterdir() if p.is_file() and p.suffix.lower().lstrip(".") in supported)
+
+
+def choose_tier(path: Path) -> str:
+    suffix = path.suffix.lower().lstrip(".")
+    if suffix in NATIVE_SUFFIXES:
+        return "flash"
+    return "standard"
+
+
+def main() -> None:
+    OUT_ROOT.mkdir(parents=True, exist_ok=True)
+    RESULTS.mkdir(parents=True, exist_ok=True)
+    files = collect(IN_ROOT)
+    rows: list[dict] = []
+
+    # 每个档位一个 parser：内部模型/运行时缓存按配置复用
+    parsers = {
+        "flash": MinerUParser(tier="flash", parse_mode="auto"),
+        "standard": MinerUParser(tier="standard", parse_mode="auto"),
+    }
+
+    try:
+        for path in files:
+            suffix = path.suffix.lower().lstrip(".")
+            tier = choose_tier(path)
+            page_range = "1-10" if suffix == "pdf" else ""
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            out_dir = RESULTS / f"{path.stem}-{digest[:8]}"
+
+            try:
+                result = parsers[tier].parse(path, page_range=page_range)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                result.save(FileBasedDataWriter(str(out_dir)))
+
+                items = render(result.middle_json, RenderFormat.CONTENT_LIST)
+                row = {
+                    "source": path.name,
+                    "tier": tier,
+                    "pages": len(result.pages),
+                    "blocks": len(items),
+                    "text_blocks": sum(1 for i in items if i["type"] == "text"),
+                    "tables": sum(1 for i in items if i["type"] == "table"),
+                    "equations": sum(1 for i in items if i["type"] == "equation"),
+                    "images": sum(1 for i in items if i["type"] == "image"),
+                    "output": str(out_dir),
+                    "status": "done",
+                    "error": "",
+                }
+            except Exception as exc:                      # 单文件失败不拖垮整批
+                row = {
+                    "source": path.name,
+                    "tier": tier,
+                    "pages": 0,
+                    "blocks": 0,
+                    "text_blocks": 0,
+                    "tables": 0,
+                    "equations": 0,
+                    "images": 0,
+                    "output": "",
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                traceback.print_exc()
+
+            rows.append(row)
+            with MANIFEST.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    finally:
+        for parser in parsers.values():
+            parser.close()
+
+    with (OUT_ROOT / "summary.csv").open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else ["source"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"done: {len(rows)} files; failed: {sum(r['status'] == 'failed' for r in rows)}")
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+
+<div class="callout">
+  <strong>结果包不是单个 JSON：</strong><code>result.save()</code> 在副本上物化素材并校验，写出 <code>markdown.md</code>、<code>middle_json.json</code>、<code>structured_content.json</code> 与图片。只保存 <code>middle_json.json</code> 会丢素材，后续无法离线重渲染。
+</div>
+
+<h2 id="views">4. 三种读取视图</h2>
+<table>
+  <thead><tr><th>视图</th><th>入口</th><th>适合</th><th>注意</th></tr></thead>
+  <tbody>
+    <tr><td>Markdown</td><td><code>result.markdown()</code></td><td>给人看、喂 LLM</td><td>渲染时现场生成，不修改语义树</td></tr>
+    <tr><td>Structured Content</td><td><code>result.structured_content()</code></td><td>扁平内容字典</td><td>没有独立 schema 身份，不是协议</td></tr>
+    <tr><td>Content List</td><td><code>render(result.middle_json, RenderFormat.CONTENT_LIST)</code></td><td>程序化遍历块</td><td>V1 扁平；V2 按页返回 <code>list[list[dict]]</code></td></tr>
+    <tr><td>MiddleJson</td><td><code>result.pages</code> / <code>result.to_dict()</code></td><td>需要完整语义树与几何</td><td>公开协议；块几何是 0–1 归一化</td></tr>
+  </tbody>
+</table>
+
+<h2 id="content-list">5. Content List 的字段与坐标</h2>
+<table>
+  <thead><tr><th>字段</th><th>含义</th><th>示例</th></tr></thead>
+  <tbody>
+    <tr><td><code>type</code></td><td>块类型</td><td><code>text</code> / <code>table</code> / <code>equation</code> / <code>image</code> / <code>list</code> / <code>code</code> / <code>chart</code></td></tr>
+    <tr><td><code>text</code></td><td>文本或 LaTeX（公式）</td><td>公式带 <code>text_format="latex"</code></td></tr>
+    <tr><td><code>text_level</code></td><td>标题层级；仅标题块</td><td><code>1</code> / <code>2</code> …</td></tr>
+    <tr><td><code>table_body</code></td><td>表格 HTML</td><td><code>&lt;table&gt;…&lt;/table&gt;</code></td></tr>
+    <tr><td><code>img_path</code></td><td>素材相对路径</td><td>配合 <code>asset_base_url</code></td></tr>
+    <tr><td><code>list_items</code></td><td>列表/目录项</td><td>嵌套列表用 <code>sub_type</code> 区分</td></tr>
+    <tr><td><code>code_body</code></td><td>代码内容</td><td>代码块</td></tr>
+    <tr><td><code>bbox</code></td><td><strong>0–1000 整数框</strong></td><td>不是像素，也不是 0–1</td></tr>
+    <tr><td><code>page_idx</code></td><td>页面索引，<strong>0 起</strong></td><td>面向上游展示时通常 +1</td></tr>
+  </tbody>
+</table>
+<div class="callout">
+  <strong>坐标陷阱：</strong>MiddleJson 的块 bbox 是 0–1 归一化；Content List 渲染后转换为 0–1000 整数。两者都不同于页面像素坐标。写死像素阈值是最常见的“换一份 PDF 就失效”原因。
+</div>
+
+<h2 id="extract">6. 字段抽取的三种模式</h2>
+<table>
+  <thead><tr><th>模式</th><th>适用</th><th>实现</th></tr></thead>
+  <tbody>
+    <tr><td>关键词 + 同行值</td><td>“发票号码：12345”</td><td>在 <code>text</code> 中查找标签并切分</td></tr>
+    <tr><td>区域匹配</td><td>位置稳定的字段</td><td><code>bbox</code> 0–1000 + <code>page_idx</code></td></tr>
+    <tr><td>表格结构</td><td>行列数据</td><td>解析 <code>table_body</code> 的 HTML</td></tr>
+  </tbody>
+</table>
+<pre><code>import re
+from html import unescape
+
+CELL_RE = re.compile(r"&lt;t[dh][^&gt;]*&gt;(.*?)&lt;/t[dh]&gt;", re.S)
+TAG_RE = re.compile(r"&lt;[^&gt;]+&gt;")
+
+def cell_texts(html: str) -> list[str]:
+    return [unescape(TAG_RE.sub("", cell)).strip() for cell in CELL_RE.findall(html)]
+
+def extract_invoice(items: list[dict]) -> dict:
+    fields = {"invoice_no": None, "date": None, "amount": None, "line_items": []}
+
+    for item in items:
+        if item["type"] != "text":
+            continue
+        text = item["text"].strip()
+        if m := re.search(r"(?:发票号码|Invoice\s*No\.?)\s*[:：]?\s*([A-Za-z0-9\-]+)", text):
+            fields["invoice_no"] = m.group(1)
+        if m := re.search(r"(?:开票日期|Date)\s*[:：]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})", text):
+            fields["date"] = m.group(1)
+        if item.get("page_idx") == 0 and item.get("bbox"):
+            x0, y0, x1, y1 = item["bbox"]
+            if x1 > 700 and y0 > 700:                 # 右下区域（0–1000）
+                if m := re.search(r"[¥￥]\s*([\d,]+\.\d{2})", text):
+                    fields["amount"] = m.group(1)
+
+    for item in items:
+        if item["type"] == "table":
+            fields["line_items"].append(cell_texts(item.get("table_body", "")))
+
+    return fields</code></pre>
+<p class="small muted">真实业务通常三种模式组合：先关键词定位，再用 bbox 验证区域，最后用表格结构校验明细合计。任何阈值都应来自样本统计，而不是拍脑袋。</p>
+
+<h2 id="production">7. 并发、重试、幂等与隐私</h2>
+<table>
+  <thead><tr><th>问题</th><th>建议</th><th>原因</th></tr></thead>
+  <tbody>
+    <tr><td>本地小模型并发</td><td>顺序处理；不要盲目开线程池</td><td>共享原子模型与推理锁，并行通常只是争锁</td></tr>
+    <tr><td>远程 VLM 并发</td><td><code>parse_batch_async</code> 或自有异步池</td><td><code>max_concurrency</code> 控制上游请求并发</td></tr>
+    <tr><td>重试</td><td>只重试 <code>remote_timeout</code> / <code>remote_unreachable</code> / 引擎暂时不可用</td><td><code>invalid_request_error</code> 重试不会变好</td></tr>
+    <tr><td>幂等</td><td>用内容 sha256 + 档位 + 页范围命名输出</td><td>重复运行不产生半成品或覆盖不同来源</td></tr>
+    <tr><td>隐私</td><td>远程 VLM / Tasks 都必须显式允许</td><td>配置了地址不等于允许上传</td></tr>
+    <tr><td>失败隔离</td><td>单文件异常写 manifest，不中断整批</td><td>批处理的价值在于可恢复</td></tr>
+  </tbody>
+</table>
+<pre><code># 幂等输出目录示例
+out_dir = RESULTS / f"{path.stem}-{digest[:8]}-{tier}-{page_range or 'all'}"
+
+# 断点续跑：manifest 中已 done 且输出存在则跳过
+if row.get("status") == "done" and Path(row["output"]).exists():
+    continue</code></pre>
+
+<h2 id="run">8. 运行与验证</h2>
+<pre><code># 在仓库根目录、已激活 conda mineru 环境
+python tools/batch_pipeline.py
+
+# 看汇总
+head -n 5 pipeline_output/summary.csv
+ls pipeline_output/results/*/markdown.md | wc -l
+
+# 核对结果包完整性：每份都应同时有 md + middle_json + structured_content + images
+find pipeline_output/results -maxdepth 2 -type f | head -20</code></pre>
+<p class="small">如果首次运行下载模型，先 <code>mineru-kit models download --tier standard</code>；离线环境把 <code>MINERU_MODEL_SOURCE=local</code> 并准备好本地模型目录。</p>
+
+<h2 id="quiz">9. 检索练习</h2>
+
+<div class="quiz" data-explanation="Content List 的 bbox 是 0–1000 整数；MiddleJson 才是 0–1 归一化。">
+  <h3>Q1. Content List 的 bbox 范围是？</h3>
+  <button class="quiz-option">0–1 小数</button>
+  <button class="quiz-option" data-correct="true">0–1000 整数</button>
+  <button class="quiz-option">页面像素</button>
+  <button class="quiz-option">毫米单位</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="page_idx 内部从 0 开始；面向用户的 page_no 才从 1 开始。">
+  <h3>Q2. Content List 的 <code>page_idx</code> 从几开始？</h3>
+  <button class="quiz-option">1</button>
+  <button class="quiz-option" data-correct="true">0</button>
+  <button class="quiz-option">-1</button>
+  <button class="quiz-option">按文档定</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="page_range 目前只支持 PDF；非 PDF 传非空页范围会报 page_range_invalid。">
+  <h3>Q3. 对 <code>.docx</code> 传 <code>page_range="1-3"</code> 会？</h3>
+  <button class="quiz-option">只解析三页</button>
+  <button class="quiz-option">自动忽略</button>
+  <button class="quiz-option" data-correct="true">报错</button>
+  <button class="quiz-option">转为 OCR</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="原生格式固定 flash；CLI 单文件显式质量档位会报错，Python SDK/批量入口会归一为 flash。">
+  <h3>Q4. Office 文件应该请求哪个 tier？</h3>
+  <button class="quiz-option">basic</button>
+  <button class="quiz-option">standard</button>
+  <button class="quiz-option">advanced</button>
+  <button class="quiz-option" data-correct="true">flash</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">10. 动手挑战</h2>
+<div class="grid-2">
+  <div class="callout">
+    <strong>挑战 1：跑通批处理</strong>
+    <p>把脚本保存为 <code>tools/batch_pipeline.py</code>，解析 <code>demo/pdfs/</code>，检查 <code>summary.csv</code> 的 pages/blocks 统计是否合理。</p>
+  </div>
+  <div class="callout">
+    <strong>挑战 2：加字段抽取</strong>
+    <p>选择一种单证（发票/合同/报表），实现至少两个字段抽取，并记录每个字段的命中率与误抽样本。</p>
+  </div>
+  <div class="callout">
+    <strong>挑战 3：失败注入</strong>
+    <p>把一个 PDF 截断成损坏文件，确认整批继续、manifest 记录 <code>failed</code>，并且重跑时只处理失败项。</p>
+  </div>
+  <div class="callout">
+    <strong>挑战 4：成本对比</strong>
+    <p>同一批文件分别用 <code>flash</code> 与 <code>standard</code>，统计耗时、页数和关键字段命中率，写下你的档位策略。</p>
+  </div>
+</div>
+
+<h2 id="review">11. 本课小结</h2>
+<table>
+  <thead><tr><th>掌握点</th><th>证据</th></tr></thead>
+  <tbody>
+    <tr><td>六阶段流水线</td><td>能说出每阶段对应哪个 API / 模块</td></tr>
+    <tr><td>按类型选档</td><td>原生格式→flash；扫描/图片→standard；难文档→advanced</td></tr>
+    <tr><td>三种视图</td><td>知道何时用 markdown / structured / content list / pages</td></tr>
+    <tr><td>字段抽取</td><td>至少实现关键词 + 区域 + 表格中的两种</td></tr>
+    <tr><td>生产约束</td><td>能解释并发、重试、幂等、隐私、素材完整性</td></tr>
+  </tbody>
+</table>
+
+<h2 id="source">12. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../next/sdk/parser.md">docs/next/sdk/parser.md</a> 与 <a href="../../../next/sdk/parse-result.md">parse-result.md</a> — 公开 SDK 契约。</li>
+  <li>配合阅读：<a href="../../../../mineru/render/_internal/content_list/v1.py">render/_internal/content_list/v1.py</a>（字段与 bbox）、<a href="../../../../mineru/parser/base.py">parser/base.py</a>（save/to_dict）。</li>
+  <li>数据格式：<a href="../../../next/page-naming.md">page-naming.md</a>、<a href="../../../next/page-ranges.md">page-ranges.md</a>。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0015-small-image-ocr-extension.html">课程 15 · 小图 OCR 扩展</a>——当整页流水线对极小输入失效时，如何安全地绕开版面模型。把你的 CSV 和字段命中率贴给教师（agent），会写入 learning-record。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 14 · 参考：<a href="../reference/commands.html">命令速查</a> · <a href="../reference/tier-matrix.html">档位矩阵</a> · <a href="../reference/glossary.html">术语表</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

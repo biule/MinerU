@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 17：部署与运维 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0016-finetune-evaluation-and-quantization.html">← 课程 16</a>
+  <a href="0007-http-and-router.html">课程 07</a>
+  <a href="../index.html">课程目录</a>
+  <a href="../reference/commands.html">命令速查</a>
+  <a href="../reference/glossary.html">术语表</a>
+</nav>
+
+<p class="eyebrow">Lesson 17 · 上线</p>
+<h1>部署与运维：从能跑到能长期跑</h1>
+<p class="lede">这节课只做一件事：把 MinerU 的进程角色、启动顺序、鉴权、容量、日志、升级与回滚讲清楚，能在一台机器或一组 worker 上稳定运行，并在故障时有明确动作。</p>
+
+<div class="callout">
+  <strong>为什么学这个：</strong>课程 07 讲协议，本课讲“谁来跑、跑在哪、怎么发现坏了”。部署错误通常不是模型问题，而是进程边界、资源上限或鉴权配置错误。
+</div>
+
+<h2 id="roles">1. 先认清进程角色</h2>
+
+<div class="flow">
+  <div class="node dark"><strong>客户端 / Nginx</strong>HTTPS · 鉴权 · 限流 · 大文件</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>Router（可选）</strong>worker 发现 · 调度 · 公共 ID 映射</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>api-server × N</strong>完整解析 API · 模型推理 · 产物</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>vlm-server（可选）</strong>OpenAI 兼容 VLM 推理</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>Doclib / file-parse / WebUI</strong>本地库 · 单文件同步 · 演示界面</div>
+</div>
+
+<table>
+  <thead><tr><th>角色</th><th>入口</th><th>职责</th><th>状态</th></tr></thead>
+  <tbody>
+    <tr><td>api-server</td><td><code>mineru-kit api-server</code></td><td>V1 Tasks、模型、下载链接、产物</td><td>元数据在内存；重启不恢复旧资源 ID</td></tr>
+    <tr><td>Router</td><td><code>mineru-kit router</code></td><td>多 worker 统一入口、调度、公共 ID</td><td>动态 worker 清单不落盘</td></tr>
+    <tr><td>vlm-server</td><td><code>mineru-kit vlm-server</code></td><td>只做 VLM 推理，OpenAI 兼容</td><td>模型服务生命周期</td></tr>
+    <tr><td>Doclib</td><td><code>mineru server start</code></td><td>入库、缓存、排队、搜索、watch</td><td>SQLite + 文件；有 home 锁</td></tr>
+    <tr><td>file-parse</td><td><code>mineru-kit file-parse-server</code></td><td>单文件 multipart 同步包装</td><td>记录持久化；可恢复查询</td></tr>
+    <tr><td>WebUI</td><td><code>mineru-kit webui</code></td><td>Gradio 演示；未给 api-url 时托管本地 API</td><td>无状态 UI</td></tr>
+  </tbody>
+</table>
+
+<h2 id="topology">2. 三种典型拓扑</h2>
+<table>
+  <thead><tr><th>拓扑</th><th>组成</th><th>适合</th><th>注意</th></tr></thead>
+  <tbody>
+    <tr><td>单机 CPU</td><td>api-server（ONNX + llama.cpp）</td><td>内网、低并发、隐私优先</td><td>内存与窗口大小；并发通常 1–2</td></tr>
+    <tr><td>单机 GPU</td><td>api-server（Torch + vLLM/LMDeploy）</td><td>吞吐优先</td><td>显存、VLM 并发、模型预加载</td></tr>
+    <tr><td>分离推理</td><td>api-server + 独立 vlm-server</td><td>多 API 复用一组 GPU</td><td>VLM 并发与网络超时；远程无回退</td></tr>
+    <tr><td>多 worker</td><td>Nginx → Router → api-server × N</td><td>多 GPU、横向扩展</td><td>公共 ID、租约、worker 健康</td></tr>
+  </tbody>
+</table>
+<pre><code># 单机：托管本地 parse-server（Doclib 拉起/停止）
+mineru config set parse_server.local.mode managed
+mineru config set parse_server.local.managed_tier standard
+mineru server start
+
+# 分离：自己起 API 与 VLM
+mineru-kit vlm-server --engine vllm --port 30000
+mineru-kit api-server --host 127.0.0.1 --port 8000 --tier standard \
+  --vlm-server-url http://127.0.0.1:30000/v1 --vlm-max-concurrency 32 --preload-models
+
+# 多 worker：Router 拉起本地 worker（auto 按 GPU 数）
+mineru-kit router --host 127.0.0.1 --port 8002 --worker-tier standard --worker-concurrency 1
+# 或接外部 worker
+mineru-kit router --upstream-url http://10.0.0.11:8000 --upstream-url http://10.0.0.12:8000</code></pre>
+
+<h2 id="startup">3. 启动顺序与配置来源</h2>
+<ol>
+  <li><strong>准备模型</strong>：<code>mineru-kit models download --tier standard</code>；离线环境设 <code>MINERU_MODEL_SOURCE=local</code>。</li>
+  <li><strong>起 VLM</strong>（如分离部署）：<code>mineru-kit vlm-server</code>，确认 <code>/v1/models</code>。</li>
+  <li><strong>起 api-server</strong>：设置 <code>--tier</code> 上限、<code>--api-key</code>、<code>--vlm-server-url</code>。</li>
+  <li><strong>起 Router</strong>（如多 worker）：配置 <code>--upstream-url</code> 或本地 GPU 列表。</li>
+  <li><strong>起 Doclib</strong>：配置 <code>parse_server.local.mode</code> 后 <code>mineru server start</code>。</li>
+  <li><strong>健康检查</strong>：<code>/v1/health</code>、<code>/v1/tiers</code>、<code>mineru server status --json</code>。</li>
+</ol>
+<table>
+  <thead><tr><th>配置层</th><th>示例</th><th>何时生效</th></tr></thead>
+  <tbody>
+    <tr><td>命令行</td><td><code>--tier</code>、<code>--port</code>、<code>--api-key</code></td><td>本次进程</td></tr>
+    <tr><td>环境变量</td><td><code>MINERU_MODEL_VLM_SERVER_URL</code>、<code>MINERU_LOG_LEVEL</code></td><td>本次进程</td></tr>
+    <tr><td>文件配置</td><td><code>$MINERU_HOME/config.yaml</code> 的 <code>model</code>、<code>doclib</code>、<code>log</code></td><td>启动时读取</td></tr>
+    <tr><td>运行时 KV</td><td><code>parse_server.local.mode</code>、<code>parse_server.remote.api_key</code></td><td>Doclib 运行中</td></tr>
+  </tbody>
+</table>
+
+<h2 id="params">4. 关键参数与容量</h2>
+<table>
+  <thead><tr><th>参数</th><th>默认</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>--tier</code></td><td>auto</td><td>PDF/图片最高开放档位；包含较低档位；不是单次请求档位</td></tr>
+    <tr><td><code>--concurrency</code></td><td>1</td><td>并发解析任务数；不是 VLM 请求并发</td></tr>
+    <tr><td><code>--preload-models</code></td><td>关</td><td>启动时初始化模型/远程 VLM；失败让能力接口报错</td></tr>
+    <tr><td><code>--api-key</code></td><td>空</td><td>设置后除 health/models/tiers 外均需 Bearer</td></tr>
+    <tr><td><code>--upload-dir</code></td><td>自动</td><td>一个目录只能由一个 API 实例占用</td></tr>
+    <tr><td><code>--retention-seconds</code></td><td>86400</td><td>终态资源保留；0 关闭自动回收</td></tr>
+    <tr><td><code>--vlm-max-concurrency</code></td><td>100</td><td>上游 VLM 请求并发</td></tr>
+    <tr><td><code>--worker-tier</code></td><td>standard</td><td>Router 托管 worker 的能力上限</td></tr>
+  </tbody>
+</table>
+
+<table>
+  <thead><tr><th>档位 / 引擎</th><th>模型下载</th><th>最低内存</th><th>加速</th></tr></thead>
+  <tbody>
+    <tr><td>basic / ONNX</td><td>~0.8 GB</td><td>2 GB</td><td>CPU 可用</td></tr>
+    <tr><td>basic / PyTorch</td><td>~0.8 GB</td><td>8 GB</td><td>建议 GPU/MPS</td></tr>
+    <tr><td>standard / ONNX + llama.cpp</td><td>~2 GB</td><td>8 GB</td><td>CPU 可用；建议 Vulkan</td></tr>
+    <tr><td>standard / PyTorch + vLLM/LMDeploy</td><td>~3 GB</td><td>16 GB</td><td>GPU/MPS，8 GB+ 显存</td></tr>
+  </tbody>
+</table>
+<p class="small">API server 的 <code>--tier auto</code>：GPU 开放四档；CPU 按可用逻辑核数推荐（≥12 → standard；4–11 → basic；&lt;4 → flash）。显式上限可覆盖推荐，但仍执行依赖预检。</p>
+
+<h2 id="systemd">5. 进程守护与反向代理</h2>
+<pre><code># /etc/systemd/system/mineru-api.service
+[Unit]
+Description=MinerU API server
+After=network-online.target
+
+[Service]
+User=mineru
+WorkingDirectory=/opt/mineru
+Environment=MINERU_HOME=/var/lib/mineru
+Environment=MINERU_MODEL_SOURCE=local
+EnvironmentFile=-/etc/mineru.env
+ExecStart=/opt/mineru/.venv/bin/mineru-kit api-server \
+  --host 127.0.0.1 --port 8000 --tier standard --preload-models \
+  --api-key ${MINERU_API_KEY}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+<pre><code># Doclib 直接以模块运行，由 systemd 托管（会获取 doclib.lock）
+ExecStart=/opt/mineru/.venv/bin/python -m mineru.doclib.app
+Environment=MINERU_HOME=/var/lib/mineru</code></pre>
+<pre><code># /etc/nginx/conf.d/mineru.conf
+server {
+    listen 443 ssl;
+    server_name mineru.example.com;
+
+    client_max_body_size 200m;              # 大 PDF
+    proxy_read_timeout 3600s;               # 长解析
+    proxy_send_timeout 3600s;
+
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8002;   # Router 或 api-server
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header Authorization $http_authorization;
+    }
+}</code></pre>
+<div class="callout">
+  <strong>Windows：</strong>仓库没有内置 Windows 服务管理。可用 NSSM、<code>sc.exe</code> 或任务计划程序托管 <code>mineru-kit.exe</code>；把 <code>MINERU_HOME</code>、模型目录与日志路径设为机器级环境变量，避免服务账户找不到用户目录。
+</div>
+
+<h2 id="security">6. 鉴权与隐私</h2>
+<table>
+  <thead><tr><th>边界</th><th>要求</th><th>常见错误</th></tr></thead>
+  <tbody>
+    <tr><td>解析 API</td><td>默认 loopback；对外必须 TLS + <code>--api-key</code></td><td>直接 <code>0.0.0.0</code> 无鉴权</td></tr>
+    <tr><td>Doclib</td><td>UDS/TCP + 持久 token；<code>MINERU_DOCLIB_AUTH_TOKEN</code> 覆盖</td><td>把 token 写进镜像或日志</td></tr>
+    <tr><td>远程 VLM</td><td><code>--vlm-api-key</code> 独立于解析 API Key</td><td>两个 Key 混用</td></tr>
+    <tr><td>远端解析</td><td>必须显式 <code>--remote</code> 或规则允许</td><td>“配了 Key 就以为会上传”</td></tr>
+    <tr><td>上传来源</td><td>URL 输入默认只允许 HTTPS；<code>--allow-http-source</code> 才放开</td><td>内网明文源被 SSRF 利用</td></tr>
+  </tbody>
+</table>
+
+<h2 id="observability">7. 可观测性</h2>
+<pre><code># 能力与健康（免鉴权）
+curl http://127.0.0.1:8000/v1/health
+curl http://127.0.0.1:8000/v1/models
+curl http://127.0.0.1:8000/v1/tiers
+
+# Doclib 状态：队列、worker、managed parse-server、日志路径
+mineru server status --json
+
+# 日志
+~/.mineru/logs/doclib.log
+~/.mineru/logs/doclib.access.log
+~/.mineru/logs/doclib.parse-server.stdout.log
+~/.mineru/logs/doclib.parse-server.stderr.log
+
+# 阶段计时：pdf.layout / pdf.ocr_detection / pdf.formulas
+#           / pdf.table_recognition / pdf.inline_vlm / pdf.image_assets</code></pre>
+<ul>
+  <li>API server 的 <code>--log-level</code> 只管服务侧（Uvicorn/访问日志）；模型日志跟随 <code>MINERU_LOG_LEVEL</code>。</li>
+  <li>托管 worker 默认用 <code>--log-level warning</code>，避免访问日志刷屏；排障时调 <code>MINERU_LOG_LEVEL</code>。</li>
+  <li>仓库不内置 Prometheus 指标；用 Nginx 访问日志、请求 ID、<code>server status</code> 与阶段计时做基础观测。</li>
+</ul>
+
+<h2 id="runbook">8. 运维手册</h2>
+<table>
+  <thead><tr><th>操作</th><th>命令 / 动作</th><th>注意</th></tr></thead>
+  <tbody>
+    <tr><td>启动 Doclib</td><td><code>mineru server start</code></td><td>同一 <code>MINERU_HOME</code> 只能一个 owner</td></tr>
+    <tr><td>停止 Doclib</td><td><code>mineru server stop</code></td><td>等待 endpoint 不可连且锁释放</td></tr>
+    <tr><td>重启</td><td><code>mineru server restart</code></td><td>先 stop 再 start，避免双实例</td></tr>
+    <tr><td>升级</td><td>停服务 → 备份 <code>MINERU_HOME</code> → 换环境 → 启动</td><td>旧 endpoint 会返回 <code>doclib_upgrade_required</code></td></tr>
+    <tr><td>备份</td><td><code>config.yaml</code>、<code>doclib.db</code>、<code>parsed/</code>、模型目录</td><td>素材与协议一起备份才能重渲染</td></tr>
+    <tr><td>恢复</td><td>停服务 → 还原 → 启动 → <code>server status</code></td><td>不要热替换 SQLite</td></tr>
+    <tr><td>清理磁盘</td><td>调小 <code>--retention-seconds</code> / 手动归档</td><td>0 表示永久保留，谨慎</td></tr>
+    <tr><td>回滚</td><td>切回旧镜像 + 旧模型目录</td><td>先确认缓存协议兼容边界</td></tr>
+  </tbody>
+</table>
+
+<h2 id="incidents">9. 常见故障速查</h2>
+<table>
+  <thead><tr><th>现象</th><th>根因</th><th>动作</th></tr></thead>
+  <tbody>
+    <tr><td><code>server_not_running</code></td><td>Doclib 未启动</td><td><code>mineru server start</code></td></tr>
+    <tr><td><code>server_busy</code> / <code>service_unavailable</code></td><td>同 home 已被另一个进程持有</td><td>查 <code>doclib.lock</code> 与 PID；不要抢占</td></tr>
+    <tr><td><code>quality_tier_unavailable</code></td><td>没有 basic/standard 引擎</td><td>起本地服务 / <code>--remote</code> / 显式 <code>flash</code></td></tr>
+    <tr><td><code>engine_dead</code> / 503</td><td>vLLM 等引擎死亡</td><td>重启引擎；Router 剔除 worker</td></tr>
+    <tr><td>首个请求很慢</td><td>模型未预加载</td><td><code>--preload-models</code> / 预热</td></tr>
+    <tr><td>上传 413</td><td>Nginx 或服务端大小限制</td><td>调 <code>client_max_body_size</code> / 分片</td></tr>
+    <tr><td>401</td><td>API Key 缺失或 VLM Key 混用</td><td>分别检查 <code>--api-key</code> 与 <code>--vlm-api-key</code></td></tr>
+    <tr><td>磁盘涨满</td><td>保留期过长 / 上传目录未清理</td><td>调 retention；检查 <code>--upload-dir</code> 独占</td></tr>
+  </tbody>
+</table>
+
+<h2 id="quiz">10. 检索练习</h2>
+
+<div class="quiz" data-explanation="--tier 是服务能力上限，并包含较低档位；不是单次请求选择的档位。">
+  <h3>Q1. api-server 的 <code>--tier standard</code> 表示？</h3>
+  <button class="quiz-option">只允许 standard</button>
+  <button class="quiz-option" data-correct="true">开放到 standard</button>
+  <button class="quiz-option">默认 advanced</button>
+  <button class="quiz-option">关闭原生格式</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="--concurrency 是解析任务并发；VLM 请求并发由 --vlm-max-concurrency 控制，两者独立。">
+  <h3>Q2. 哪个参数控制 VLM 请求并发？</h3>
+  <button class="quiz-option">--concurrency</button>
+  <button class="quiz-option">--worker-concurrency</button>
+  <button class="quiz-option" data-correct="true">--vlm-max-concurrency</button>
+  <button class="quiz-option">--retention-seconds</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="api-server 的资源元数据在内存；重启后旧资源 ID 不恢复，客户端应重新提交或保留自己的结果。">
+  <h3>Q3. api-server 重启后旧资源 ID？</h3>
+  <button class="quiz-option">全部恢复</button>
+  <button class="quiz-option">部分恢复</button>
+  <button class="quiz-option" data-correct="true">不恢复</button>
+  <button class="quiz-option">转为缓存</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="默认只监听 loopback；对外暴露必须加 TLS 与 API Key，并区分解析 API Key 与上游 VLM Key。">
+  <h3>Q4. 对外暴露解析服务的最低要求？</h3>
+  <button class="quiz-option">只开端口</button>
+  <button class="quiz-option" data-correct="true">TLS + API Key</button>
+  <button class="quiz-option">只加日志</button>
+  <button class="quiz-option">只改端口</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">11. 动手挑战</h2>
+<ol>
+  <li>用 <code>mineru-kit api-server --tier standard --preload-models</code> 起服务，记录启动耗时、显存/内存、<code>/v1/tiers</code> 输出。</li>
+  <li>加一个 Nginx 反代（或本机端口转发），上传 100 MB PDF，确认超时与大小限制。</li>
+  <li>配置 <code>--api-key</code>，分别测试无 Key、错误 Key、正确 Key 的 health 与 tasks 请求。</li>
+  <li>模拟引擎故障（停掉 vllm-server），观察错误码、日志与 Router 的 worker 健康变化。</li>
+  <li>写一份值班卡片：启动顺序、健康检查、日志位置、回滚步骤，贴在项目 <code>docs/tech/teach/reference/</code> 下。</li>
+</ol>
+
+<h2 id="review">12. 本课小结</h2>
+<table>
+  <thead><tr><th>掌握点</th><th>证据</th></tr></thead>
+  <tbody>
+    <tr><td>进程边界</td><td>能说出 api-server / Router / vlm-server / Doclib 各自职责</td></tr>
+    <tr><td>启动顺序</td><td>能按“模型→VLM→API→Router→Doclib→健康检查”部署</td></tr>
+    <tr><td>容量与参数</td><td>能区分解析并发、VLM 并发、服务档位上限</td></tr>
+    <tr><td>安全</td><td>默认 loopback、TLS、两套 Key、显式远端许可</td></tr>
+    <tr><td>运维</td><td>能完成备份、升级、回滚与三类故障处置</td></tr>
+  </tbody>
+</table>
+
+<h2 id="source">13. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../next/cli/mineru-kit-api-server.md">mineru-kit api-server</a>、<a href="../../../next/cli/mineru-server.md">mineru server</a>、<a href="../../../next/api/router.md">Router</a>。</li>
+  <li>配合阅读：<a href="../../../next/cli/mineru-kit-vlm-server.md">vlm-server</a>、<a href="../../../next/model-assets.md">模型资产</a>、<a href="../../../next/config.md">配置</a>、<a href="../../../next/errors.md">错误码</a>。</li>
+  <li>安全边界：<a href="../../../next/invariants.md">docs/next/invariants.md</a>。</li>
+</ul>
+
+<div class="callout">
+  <strong>课程终点：</strong>到这里，你已经覆盖“追踪 → 选档 → 流水线 → 协议 → Doclib → 配置 → HTTP → 扩展 → 排障 → 微调 → 运行时 → 应用 → 评测 → 部署”。下一步不是继续读课，而是选一个真实改动，用课程 08 的清单和本课的运维手册落地。把计划和验收结果贴给教师（agent），会写入 learning-record。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 17 · 参考：<a href="../reference/commands.html">命令速查</a> · <a href="../reference/architecture-map.html">架构地图</a> · <a href="../reference/glossary.html">术语表</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

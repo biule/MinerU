@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考：常见问题 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="../index.html">课程目录</a>
+  <a href="study-plan.html">学习路线</a>
+  <a href="architecture-map.html">架构地图</a>
+  <a href="tier-matrix.html">档位矩阵</a>
+  <a href="glossary.html">术语表</a>
+  <a href="commands.html">命令速查</a>
+</nav>
+
+<p class="eyebrow">Reference · FAQ</p>
+<h1>常见问题</h1>
+<p class="lede">把“看起来像 bug”的高频现象按使用、服务、模型、微调、开发分组。每条给最短结论、原因和对应课程；细节以源码与 docs/next 为准。</p>
+
+<h2 id="usage">1. 使用与输出</h2>
+<table>
+  <thead><tr><th style="width:30%">问题</th><th>结论与原因</th><th style="width:12%">详见</th></tr></thead>
+  <tbody>
+    <tr><td>为什么不同入口默认档位不同？</td><td>Doclib 主动解析按 <code>standard → basic</code>；Tasks 按 <code>standard → basic → flash → advanced</code>；缓存读取按 <code>advanced → standard → basic</code>；原生格式固定 <code>flash</code>。语义不同，不能复用同名选择器。</td><td><a href="tier-matrix.html">档位矩阵</a></td></tr>
+    <tr><td><code>flash</code> 是不是最差？</td><td>不是。它决定“是否用 VLM、是否两步、是否图片分析”；原生格式只有 flash，质量由格式解析决定。flash 更适合发现、预览、索引。</td><td><a href="../lessons/0002-choose-the-right-tier.html">02</a></td></tr>
+    <tr><td>为什么 <code>mineru parse</code> 只读前 10 页？</td><td>Doclib 默认 <code>default_parse_range</code> 是前 10 页，控制首次阅读成本；整本用 <code>--pages all</code>。</td><td><a href="../lessons/0005-doclib-state-line.html">05</a></td></tr>
+    <tr><td>第二次 parse 为什么快？</td><td>缓存按 <code>sha256 + tier + 页范围</code> 覆盖；已完成的页直接扣除，只解析缺失页。</td><td><a href="../lessons/0005-doclib-state-line.html">05</a></td></tr>
+    <tr><td><code>--force</code>、<code>invalidate</code>、<code>forget</code> 有什么区别？</td><td>force 只让本次跳过 done 缓存；invalidate 让未来请求避开旧缓存但不触发解析；forget 移除记录与缓存但不删源文件。</td><td><a href="../lessons/0005-doclib-state-line.html">05</a></td></tr>
+    <tr><td><code>mineru read</code> 会触发解析吗？</td><td>不会；只读已有缓存。没有缓存返回 <code>not_cached</code> / <code>tier_not_cached</code>。</td><td><a href="../lessons/0005-doclib-state-line.html">05</a></td></tr>
+    <tr><td>图片会单独走一条流水线吗？</td><td>不会；输入准备阶段先转 PDF，之后与普通 PDF 同一条路径。</td><td><a href="../lessons/0001-trace-a-pdf.html">01</a></td></tr>
+    <tr><td>为什么页数对不上？</td><td>坏页会以空块占位保留页序；也可能是页范围重写。检查 PageInfo 与日志。</td><td><a href="../lessons/0009-debugging.html">09</a></td></tr>
+    <tr><td>公式为空 / 表格乱？</td><td>公式先看 <code>pdf.inline_vlm</code> 切片告警与回退；表格先确认 txt/ocr 模式与原生表格优先，扫描件应走 OCR 档位。</td><td><a href="../lessons/0003-pdf-pipeline-stages.html">03</a></td></tr>
+  </tbody>
+</table>
+
+<h2 id="service">2. 服务与部署</h2>
+<table>
+  <thead><tr><th style="width:30%">问题</th><th>结论与原因</th><th style="width:12%">详见</th></tr></thead>
+  <tbody>
+    <tr><td>配了 remote URL 和 Key，为什么不上传？</td><td>存在配置 ≠ 允许上传；必须显式 <code>--remote</code> 或规则允许。自动上传是 bug。</td><td><a href="../lessons/0006-config-and-privacy.html">06</a></td></tr>
+    <tr><td>HTTP 200 就代表解析成功吗？</td><td>不代表。任务创建/查询是 200 级别，但逐文件状态可能是 failed；按 file 状态与结果链接判断。</td><td><a href="../lessons/0007-http-and-router.html">07</a></td></tr>
+    <tr><td><code>parse_wait_timeout</code> 后任务被取消了吗？</td><td>没有；解析仍在后台。可稍后 <code>read</code> 缓存或重新等待；客户端超时不等于取消。</td><td><a href="../lessons/0009-debugging.html">09</a></td></tr>
+    <tr><td>为什么服务只监听了 127.0.0.1？</td><td>默认 loopback 是安全边界；对外必须显式改 host，并加 TLS 与 <code>--api-key</code>。</td><td><a href="../lessons/0017-deployment-and-operations.html">17</a></td></tr>
+    <tr><td>Windows 上 Doclib 用什么传输？</td><td>UDS 不可用时自动回退 TCP loopback（默认 15980）；endpoint 写入 <code>doclib.endpoint.json</code>。</td><td><a href="../lessons/0006-config-and-privacy.html">06</a></td></tr>
+    <tr><td>服务重启后旧 task/file ID 还能用吗？</td><td>api-server 的资源元数据在内存，重启不恢复；Doclib 的持久化缓存与解析记录另算。</td><td><a href="../lessons/0017-deployment-and-operations.html">17</a></td></tr>
+    <tr><td>Router 和 api-server 什么关系？</td><td>Router 对外仍是 Tasks 协议，负责 worker 发现/调度/公共 ID；worker 必须是完整 Parse API，不能指向原生 vlm-server。</td><td><a href="../lessons/0007-http-and-router.html">07</a></td></tr>
+    <tr><td>怎么判断服务健康？</td><td><code>/v1/health</code>、<code>/v1/models</code>、<code>/v1/tiers</code>；Doclib 用 <code>mineru server status --json</code>。托管 worker 默认 warning 日志。</td><td><a href="../lessons/0017-deployment-and-operations.html">17</a></td></tr>
+  </tbody>
+</table>
+
+<h2 id="model">3. 模型与引擎</h2>
+<table>
+  <thead><tr><th style="width:30%">问题</th><th>结论与原因</th><th style="width:12%">详见</th></tr></thead>
+  <tbody>
+    <tr><td>GPU 为什么没用上？</td><td>先看小模型后端（Torch 依赖/设备）与 VLM 引擎选择；Torch 不可用会回落 ONNX/CPU，日志会给出实际 provider。</td><td><a href="../lessons/0013-model-runtime-and-vlm-engine.html">13</a></td></tr>
+    <tr><td>为什么 CPU 上用 llama.cpp？</td><td>auto 固定规则：非 Linux/Windows、CPU、无 vLLM/LMDeploy 时选 llama.cpp；CPU 上不求高吞吐。</td><td><a href="../lessons/0002-choose-the-right-tier.html">02</a></td></tr>
+    <tr><td>远程 VLM 断了会自动回退吗？</td><td>不会。远程优先且无回退；失败直接报错，避免结果漂移。</td><td><a href="../lessons/0013-model-runtime-and-vlm-engine.html">13</a></td></tr>
+    <tr><td>模型下载/离线怎么弄？</td><td><code>mineru-kit models download --tier standard</code>；离线设 <code>MINERU_MODEL_SOURCE=local</code> 并准备本地目录；<code>models verify</code> 校验。</td><td><a href="commands.html">命令速查</a></td></tr>
+    <tr><td>GGUF 为什么需要两个文件？</td><td>llama.cpp 需要主模型 + <code>mmproj</code> 多模态投影；两者必须配对，不匹配会乱码或静默错误。</td><td><a href="../lessons/0013-model-runtime-and-vlm-engine.html">13</a></td></tr>
+    <tr><td>vlm-server 和 api-server 能互相替代吗？</td><td>不能。vlm-server 只做 OpenAI 兼容推理；api-server 才是完整解析 Tasks。Router 只能接 api-server。</td><td><a href="../lessons/0013-model-runtime-and-vlm-engine.html">13</a></td></tr>
+    <tr><td>显存不够怎么办？</td><td>降低 <code>max_concurrency</code>、用小批量、换 llama.cpp/更小模型、减窗口大小；不要盲目加 worker。</td><td><a href="../lessons/0017-deployment-and-operations.html">17</a></td></tr>
+  </tbody>
+</table>
+
+<h2 id="finetune">4. 微调与评测</h2>
+<table>
+  <thead><tr><th style="width:30%">问题</th><th>结论与原因</th><th style="width:12%">详见</th></tr></thead>
+  <tbody>
+    <tr><td>仓库里有训练代码吗？</td><td>没有。MinerU 是模型使用方，通过 <code>MinerUClient</code> 消费模型；训练在外部完成。</td><td><a href="../lessons/0010-finetune-overview.html">10</a></td></tr>
+    <tr><td>微调后“没效果”？</td><td>先确认档位是 standard/advanced（flash/basic 不调用 VLM）、请求确实到了新权重、评测输入与推理输入分布一致。</td><td><a href="../lessons/0012-serve-finetuned-model.html">12</a></td></tr>
+    <tr><td>训练数据要什么形态？</td><td>匹配推理：按块裁剪图 + 类型专属 prompt + 目标格式（表格 HTML、公式 LaTeX、文本原文）。</td><td><a href="../lessons/0011-build-finetune-dataset.html">11</a></td></tr>
+    <tr><td>怎么证明变好了？</td><td>固定协议做 A/B，按块类型分项指标，报告配对均值与 95% 区间；同时看回归集与成本。</td><td><a href="../lessons/0016-finetune-evaluation-and-quantization.html">16</a></td></tr>
+    <tr><td>量化为什么掉点？</td><td>长公式、密排表格、稀有字符更敏感；必须分项验收，不能只看平均 CER。</td><td><a href="../lessons/0016-finetune-evaluation-and-quantization.html">16</a></td></tr>
+    <tr><td>微调权重怎么接回来？</td><td>三条路径：远程 vLLM（推荐）、本地引擎加载、GGUF + llama.cpp；都要用 standard 端到端验证。</td><td><a href="../lessons/0012-serve-finetuned-model.html">12</a></td></tr>
+  </tbody>
+</table>
+
+<h2 id="dev">5. 开发与扩展</h2>
+<table>
+  <thead><tr><th style="width:30%">问题</th><th>结论与原因</th><th style="width:12%">详见</th></tr></thead>
+  <tbody>
+    <tr><td>新增格式解析写在哪？</td><td>原生格式只在 DocVortex 实现；MinerU 只登记扩展名与路由。复制第二份实现会破坏唯一归属。</td><td><a href="../lessons/0008-extend-safely.html">08</a></td></tr>
+    <tr><td>新增渲染格式写在哪？</td><td>通用格式在 DocVortex；Content List V1/V2 与专用选项在 MinerU。加 <code>RenderFormat</code>、<code>render()</code> 分支与 <code>__all__</code>。</td><td><a href="../lessons/0008-extend-safely.html">08</a></td></tr>
+    <tr><td>新增 VLM 引擎改哪？</td><td><code>selector.py</code> 的显式映射与 auto 规则、<code>runtime.py</code> 的构造/关闭分支、必要的 <code>ModelRepo</code> 与 optional extra。</td><td><a href="../lessons/0008-extend-safely.html">08</a> / <a href="../lessons/0013-model-runtime-and-vlm-engine.html">13</a></td></tr>
+    <tr><td>能用运行时注册/猴子补丁吗？</td><td>不行。项目原则是确定性优先：显式映射、显式导出、无 import 副作用、重依赖惰性加载。</td><td><a href="../../../../CLAUDE.md">CLAUDE.md</a></td></tr>
+    <tr><td>旧 3.x 结果还能直接读吗？</td><td>通用读取不兼容；历史兼容仅在 Doclib 缓存读取边界，由 <code>read_cached_middle_json</code> 处理。</td><td><a href="../../../next/middle-json/doclib-compatibility.md">middle-json</a></td></tr>
+    <tr><td>内容列表坐标是 0–1 还是像素？</td><td>Content List 是 0–1000 整数；MiddleJson 是 0–1；OCR 原子模型返回输入图像像素。</td><td><a href="../lessons/0014-batch-pipeline-and-field-extraction.html">14</a> / <a href="../lessons/0015-small-image-ocr-extension.html">15</a></td></tr>
+    <tr><td>小图解析为空怎么办？</td><td>先判断是 Layout 没给块还是识别错；前者可直调 OCR 原子模型并封装受控端点，后者走模型/数据改进。</td><td><a href="../lessons/0015-small-image-ocr-extension.html">15</a></td></tr>
+    <tr><td>改完怎么自查？</td><td>过课程 08 的护栏五查：副作用、导入/导出、隐私、协议、生命周期；再跑四线测试。</td><td><a href="../lessons/0008-extend-safely.html">08</a></td></tr>
+  </tbody>
+</table>
+
+<h2 id="more">6. 还有问题？</h2>
+<div class="callout">
+  <strong>提问模板：</strong>“我在 <code>文件:行</code> 看到 <code>行为</code>，预期是 <code>X</code>，实际是 <code>Y</code>；已排除 <code>Z</code>。” 贴命令、输出、错误码；不要只说“解析不对”。教师（agent）会据此定位到课程或源码。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 参考文档 · 冲突时以源码与 <a href="../../../next/README.md">docs/next</a> 为准。</p>
+
+</div>
+</body>
+</html>

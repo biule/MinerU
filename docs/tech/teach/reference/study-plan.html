@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考：学习路线与自检 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="../index.html">课程目录</a>
+  <a href="../lessons/0001-trace-a-pdf.html">课程 01</a>
+  <a href="architecture-map.html">架构地图</a>
+  <a href="tier-matrix.html">档位矩阵</a>
+  <a href="glossary.html">术语表</a>
+  <a href="commands.html">命令速查</a>
+  <a href="faq.html">常见问题</a>
+</nav>
+
+<p class="eyebrow">Reference · Study plan</p>
+<h1>学习路线与自检</h1>
+<p class="lede">把 17 课组织成可执行的路线：先建立主线，再按目标选支线；每课都有“能做到什么”的自检标准，而不是“读过了”。</p>
+
+<h2 id="map">1. 课程地图</h2>
+<table>
+  <thead><tr><th>阶段</th><th>课程</th><th>目标</th><th>建议时长</th></tr></thead>
+  <tbody>
+    <tr><td>0 定位</td><td>01</td><td>能画出 PDF → MiddleJson 主链</td><td>30 分钟</td></tr>
+    <tr><td>1 地基</td><td>01–04</td><td>追踪、选档、窗口阶段、结果协议</td><td>2.5 小时</td></tr>
+    <tr><td>2 状态与服务</td><td>05–07</td><td>Doclib 缓存、两阶段配置、Tasks 生命周期</td><td>2 小时</td></tr>
+    <tr><td>3 扩展与排障</td><td>08–09</td><td>四类改动的落点、错误码与日志定位</td><td>1.5 小时</td></tr>
+    <tr><td>4 模型深挖</td><td>13</td><td>VLM 运行时、引擎、远程、生命周期</td><td>1 小时</td></tr>
+    <tr><td>5 落地应用</td><td>14–15</td><td>批量流水线、字段抽取、小图 OCR 旁路</td><td>2.5 小时</td></tr>
+    <tr><td>6 微调</td><td>10–12, 16</td><td>调用点、数据、服务化、A/B 验收与量化</td><td>4 小时</td></tr>
+    <tr><td>7 上线</td><td>17</td><td>进程拓扑、鉴权、容量、升级与回滚</td><td>1.5 小时</td></tr>
+  </tbody>
+</table>
+<p class="small muted">时长是阅读 + 练习的估计；源码练习和动手挑战才是主要成本。</p>
+
+<h2 id="routes">2. 三条推荐路线</h2>
+<table>
+  <thead><tr><th>目标</th><th>顺序</th><th>可以先跳过</th><th>必须做的练习</th></tr></thead>
+  <tbody>
+    <tr><td><strong>维护 fork / 改流水线</strong></td><td>01 → 02 → 03 → 04 → 08 → 09 → 13 → 17</td><td>10–12, 16（除非改模型）</td><td>08 的四类改动清单 + 09 的三个实战</td></tr>
+    <tr><td><strong>做单证解析应用</strong></td><td>01 → 02 → 04 → 05 → 06 → 14 → 15 → 17</td><td>08 的引擎部分可后补</td><td>14 的批处理 + 字段命中率报告</td></tr>
+    <tr><td><strong>微调并上线</strong></td><td>01 → 02 → 03 → 10 → 11 → 12 → 16 → 17</td><td>05 的缓存细节可后补</td><td>16 的 A/B 报告 + 量化对比</td></tr>
+  </tbody>
+</table>
+
+<h2 id="checklist">3. 每课自检清单</h2>
+<table>
+  <thead><tr><th>课</th><th>能做到</th><th>可验证证据</th></tr></thead>
+  <tbody>
+    <tr><td>01 追踪 PDF</td><td>不看资料说出五个决策点与三个对象边界</td><td>手画调用链；指出改动落点</td></tr>
+    <tr><td>02 选档</td><td>按硬件/依赖选档并解释默认与不降级</td><td>四个场景练习全对</td></tr>
+    <tr><td>03 窗口阶段</td><td>按顺序复述阶段与启用矩阵</td><td>解释一次公式为空的回退路径</td></tr>
+    <tr><td>04 结果与渲染</td><td>区分 ModelJson/MiddleJson/ParseResult；用对 save/render</td><td>写出一次结果包并指出缺素材会怎样</td></tr>
+    <tr><td>05 Doclib</td><td>解释按页缓存、复用、读取不解析</td><td>预测第二次 parse 的行为并验证</td></tr>
+    <tr><td>06 配置隐私</td><td>说清两阶段、优先级、上传许可</td><td>用环境变量启用远程 VLM；解释为何不上传</td></tr>
+    <tr><td>07 HTTP/Router</td><td>走完 Tasks 生命周期；解释逐文件完成与 ID 不透明</td><td>用 curl 完成创建→上传→查询→下载</td></tr>
+    <tr><td>08 安全扩展</td><td>对四类改动列出完整改动点与护栏</td><td>提交一份改动计划并过五查</td></tr>
+    <tr><td>09 排障</td><td>按错误码定位阶段并给出动作</td><td>完成三个故障注入实验</td></tr>
+    <tr><td>10 微调总览</td><td>指出 VLM 调用点，判断三条落地路径</td><td>画出 MinerUClient 调用链</td></tr>
+    <tr><td>11 数据构造</td><td>复刻推理输入分布，产出三元组</td><td>manifest 中 image/prompt/params 齐全</td></tr>
+    <tr><td>12 服务化</td><td>把非官方权重接回并端到端验证</td><td>standard 解析命中微调模型</td></tr>
+    <tr><td>13 运行时</td><td>解释缓存键、引擎选择、远程无回退、生命周期</td><td>定位一次引擎/连接故障</td></tr>
+    <tr><td>14 批量流水线</td><td>按类型选档、批量解析、抽取字段、失败隔离</td><td>summary.csv + 字段命中率</td></tr>
+    <tr><td>15 小图 OCR</td><td>区分 Layout 漏检与识别错；安全直调并封装 API</td><td>210×18 对照实验 + 端点测试</td></tr>
+    <tr><td>16 微调验收</td><td>固定协议、分项指标、配对区间、量化验收</td><td>一页纸验收报告 + 回滚方案</td></tr>
+    <tr><td>17 部署运维</td><td>进程拓扑、启动顺序、鉴权、容量、升级回滚</td><td>值班卡片 + 一次故障演练</td></tr>
+  </tbody>
+</table>
+
+<h2 id="evidence">4. 什么算“学会”</h2>
+<div class="callout">
+  <strong>学习记录只写证据，不写覆盖：</strong>“读完第 5 课”不是证据；“能预测第二次 <code>mineru parse</code> 只解析缺失页，并用日志验证”才是。把代码行、命令输出、错误码或对比数据贴给教师（agent），再写入 <a href="../learning-records/">learning-records/</a>。
+</div>
+<ul>
+  <li><strong>概念证据</strong>：不看资料复述链路、阶段、边界，并能回答“为什么”。</li>
+  <li><strong>源码证据</strong>：指出具体文件/函数/行，解释其行为。</li>
+  <li><strong>操作证据</strong>：命令输出、日志片段、修复前后对比。</li>
+  <li><strong>迁移证据</strong>：把一个课内结论应用到新文档/新故障上。</li>
+</ul>
+
+<h2 id="review">5. 复习节奏</h2>
+<table>
+  <thead><tr><th>时间</th><th>动作</th><th>目标</th></tr></thead>
+  <tbody>
+    <tr><td>学完当天</td><td>做本课 quiz + 一个源码练习</td><td>建立初始检索</td></tr>
+    <tr><td>第 2 天</td><td>合上资料复述本课三条结论</td><td>发现遗忘点</td></tr>
+    <tr><td>第 1 周</td><td>重做错题 + 用主源核对一处细节</td><td>纠正错误记忆</td></tr>
+    <tr><td>第 1 月</td><td>做一次跨课任务（如 14+17 或 12+16）</td><td>形成迁移能力</td></tr>
+  </tbody>
+</table>
+<p class="small muted">参考文档（架构地图、档位矩阵、术语表、命令速查、FAQ）用于间隔复习；课程 HTML 用于首次学习。</p>
+
+<h2 id="ask">6. 卡住时怎么问</h2>
+<ol>
+  <li>贴出你正在看的<strong>文件路径 + 函数名 + 代码行</strong>。</li>
+  <li>写出你的<strong>预期</strong>与<strong>实际</strong>（命令、输出、错误码）。</li>
+  <li>说明你已排除的假设（例如“不是 tier 问题，我显式用了 standard”）。</li>
+  <li>问一个可回答的问题：“这一行为什么在 VLM 推理期间释放锁？”而不是“讲讲运行时”。</li>
+</ol>
+
+<h2 id="legacy">7. 3.x 旧课程 → 4.x 课程映射</h2>
+<p>旧课程（<a href="../../teach-old/">docs/tech/teach-old</a>）的 API 与引擎名已过时，但教学方向仍可参考。映射如下：</p>
+<table>
+  <thead><tr><th>旧课程主题</th><th>新课程 / 参考</th><th>变化</th></tr></thead>
+  <tbody>
+    <tr><td>01–03 认识、架构、配置</td><td>01–02、06</td><td>三后端 → tier + small backend + VLM engine</td></tr>
+    <tr><td>04–07 实战、JSON、Python API、流水线</td><td>04、14</td><td>输出协议升级；批处理与字段抽取合并为落地课</td></tr>
+    <tr><td>08–09 源码、VLM 调试</td><td>01、03、08、13</td><td>调用链重写；运行时/引擎独立成课</td></tr>
+    <tr><td>10 小图 OCR API</td><td>15</td><td>重新对 4.x <code>AtomModelSingleton</code> 验证</td></tr>
+    <tr><td>11–14 微调、数据、评估</td><td>10–12、16</td><td>保留数据/服务化；补 A/B 与量化验收</td></tr>
+    <tr><td>15 生产部署</td><td>17</td><td>改为 api-server / Router / vlm-server / Doclib 拓扑</td></tr>
+  </tbody>
+</table>
+
+<p class="footer">MinerU 4.1.7 · 参考文档 · 路线可按目标裁剪，但 01–04 与 08–09 是扩展 fork 的共同地基。</p>
+
+</div>
+</body>
+</html>

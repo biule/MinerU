@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 10：微调总览 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0009-debugging.html">← 课程 09</a>
+  <a href="0011-build-finetune-dataset.html">课程 11 →</a>
+  <a href="../reference/architecture-map.html">架构地图</a>
+  <a href="../reference/glossary.html">术语表</a>
+  <a href="../reference/tier-matrix.html">档位矩阵</a>
+</nav>
+
+<p class="eyebrow">Lesson 10 · 微调系列 1/3</p>
+<h1>微调总览：VLM 在哪里、能改什么</h1>
+<p class="lede">这节课只做一件事：能指出 MinerU 里“模型”被调用的确切位置，说清三条微调落地路径各自的边界，并判断你的需求属于哪一条。</p>
+
+<div class="callout">
+  <strong>先认清边界：</strong>本仓库<strong>不含训练代码</strong>。MinerU 是模型的使用方：它通过 <code>mineru_vl_utils.MinerUClient</code> 调用模型。微调本身在外部完成（vLLM/transformers 等框架），落地方式是把微调后的模型<strong>接回</strong> MinerU 的推理路径。
+</div>
+
+<h2 id="where">1. 模型在哪里被调用</h2>
+
+<div class="flow">
+  <div class="node dark"><strong>窗口推理</strong>high/xhigh 档位的 VLM 阶段</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>VlmPredictor 协议</strong>batch_extract_with_layout · batch_two_step_extract · batch_recognize_text</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>MinerUClient</strong>mineru_vl_utils · 构造 prompt / 采样参数 / 后处理</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>四个后端</strong>llama.cpp · vLLM · LMDeploy · MLX ·(或 http-client 远程)</div>
+</div>
+
+<pre><code># mineru/model/vlm/runtime.py —— 所有本地/远程后端最后都收敛到一个客户端
+predictor = MinerUClient(
+    backend=backend,            # llama-cpp-engine / vllm-async-engine / http-client / …
+    model_name=model_name,
+    server_url=server_url,      # 远程模式
+    ...
+    enable_table_formula_eq_wrap=True,
+    image_analysis=True,
+)</code></pre>
+
+<h2 id="what">2. 能“改模型行为”的四层</h2>
+<table>
+  <thead><tr><th>层</th><th>是否需要训练</th><th>改哪里</th><th>影响范围</th></tr></thead>
+  <tbody>
+    <tr><td>Prompt / 采样参数</td><td>❌</td><td><code>mineru_vl_utils</code> 的 <code>DEFAULT_PROMPTS</code> / <code>DEFAULT_SAMPLING_PARAMS</code></td><td>每种块类型的识别指令（table / equation / text…）</td></tr>
+    <tr><td>抽取开关</td><td>❌</td><td><code>not_extract_list</code>、<code>image_analysis</code>、<code>skip_list</code></td><td>哪些块交给 VLM、跳过哪些类型</td></tr>
+    <tr><td>模型权重</td><td>✅ <strong>微调</strong></td><td>权重文件（Safetensors / GGUF）</td><td>识别质量、新版面、专属领域</td></tr>
+    <tr><td>流水线策略</td><td>❌</td><td><code>backend/analysis/pdf/</code> 阶段逻辑</td><td>何时调用 VLM、回退规则</td></tr>
+  </tbody>
+</table>
+<p class="small muted">练手顺序：从上往下。多数“模型不听话”的问题在第一、二层就能解决，不必微调。</p>
+
+<h2 id="paths">3. 微调后的三条落地路径</h2>
+
+<div class="flow-h">
+  <div class="node"><strong>路径 A：远程服务</strong>微调模型 → vLLM OpenAI 服务<br>→ <code>model.vlm.server_url</code> 指向它（<strong>首选</strong>）</div>
+  <div class="node accent"><strong>路径 B：本地引擎</strong>权重放本地 → vLLM/LMDeploy 本地加载<br>或转换为 GGUF + llama.cpp</div>
+  <div class="node"><strong>路径 C：无训练适配</strong>只改 prompt / 开关 / 流水线<br>不碰权重</div>
+</div>
+
+<h3 id="path-a">路径 A：远程服务（推荐起点）</h3>
+<p>MinerU 对远程 VLM 是一等公民支持——<code>docs/next/config.md</code> 明确：上游“须部署支持 MinerU 文档理解输出的模型，并提供 <code>/v1/models</code> 和 <code>/v1/chat/completions</code>”。微调后的模型用 vLLM 起一个 OpenAI 服务即可接入：</p>
+<pre><code># config.yaml —— 所有本地解析入口共享；远程地址优先于本地引擎
+model:
+  vlm:
+    server_url: http://127.0.0.1:30000/v1
+    api_key: ${VLM_API_KEY:-}
+    model: ""            # 空时要求上游模型列表恰好包含一个模型
+    http_timeout: 600
+    max_concurrency: 100</code></pre>
+<ul>
+  <li>验证来源：<a href="../../../../mineru/model/vlm/client.py">mineru/model/vlm/client.py</a> —— <code>server_url</code> 非空即构造 <code>http-client</code>，不加载本地引擎。</li>
+  <li>远程模式<strong>不会自动回退</strong>本地 VLM。</li>
+  <li><code>max_concurrency</code> 是 VLM 请求并发，与 API server 的 <code>--concurrency</code>（解析任务并发）不同。</li>
+</ul>
+
+<h3 id="path-b">路径 B：本地引擎</h3>
+<ul>
+  <li><strong>vLLM / LMDeploy</strong>：放本地权重目录，引擎按 <code>resolve_vlm_engine()</code> 自动选择或显式指定。</li>
+  <li><strong>llama.cpp</strong>：需要把微调权重转换为 GGUF（主模型 + mmproj 投影两个文件），放入 <code>MINERU_2_5_PRO_2605_1_2B_GGUF</code> 仓库的路径约定（<code>main</code> + <code>mmproj</code>）。</li>
+  <li>模型来源可用 <code>model.source: local</code> + <code>model.base_dir</code> 指定本地目录。</li>
+</ul>
+
+<h3 id="path-c">路径 C：不训练的适配（先试这个）</h3>
+<p><code>MinerUClient</code> 把每种块类型的 prompt 与采样参数显式列在表里：</p>
+<pre><code># mineru_vl_utils/mineru_client.py
+DEFAULT_PROMPTS = {
+    "table": "\nTable Recognition:",
+    "equation": "\nFormula Recognition:",
+    "image": "\nImage Analysis:",
+    "[default]": "\nText Recognition:",
+    "[layout]": "\nLayout Detection:",
+}
+DEFAULT_SAMPLING_PARAMS = {
+    "[default]": MinerUSamplingParams(presence_penalty=1.0, frequency_penalty=0.05),
+    ...
+}</code></pre>
+<p class="small">改这张表 = 改全部 standard/advanced 调用的行为；动表之前先用 <code>content_extract</code> 手工验证因果。</p>
+
+<h2 id="decide">4. 决策树</h2>
+
+<div class="flow">
+  <div class="node dark"><strong>症状</strong>“识别错了/漏了/领域不对”</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>是 prompt 或开关问题吗？</strong>是 → 路径 C（改表 / not_extract_list）</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>通用模型缺领域知识？</strong>是 → 微调 → 训练数据（课程 11）</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>服务化还是单机？</strong>多机/服务 → 路径 A（vLLM 远程）<br>单机 → 路径 B（本地引擎）</div>
+</div>
+
+<h2 id="quiz">5. 检索练习</h2>
+
+<div class="quiz" data-explanation="训练代码不在 MinerU 仓库里；MinerU 只通过 MinerUClient 消费模型，微调在外部完成。">
+  <h3>Q1. MinerU 仓库里包含 VLM 训练代码吗？</h3>
+  <button class="quiz-option" data-correct="true">不包含</button>
+  <button class="quiz-option">包含全部</button>
+  <button class="quiz-option">部分脚本</button>
+  <button class="quiz-option">实验功能</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="server_url 非空 → get_vlm_predictor 构造 http-client；远程地址优先于本地引擎且不自动回退。">
+  <h3>Q2. 配置远程 server_url 后，本地引擎会？</h3>
+  <button class="quiz-option">同时加载</button>
+  <button class="quiz-option" data-correct="true">不会加载</button>
+  <button class="quiz-option">自动回退</button>
+  <button class="quiz-option">轮流使用</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="识别指令按块类型分表：table/equation/image/text/layout 各有 prompt 与采样参数。">
+  <h3>Q3. 改“Table Recognition:”提示词要动哪张表？</h3>
+  <button class="quiz-option">采样表</button>
+  <button class="quiz-option">布局表</button>
+  <button class="quiz-option" data-correct="true">提示词表</button>
+  <button class="quiz-option">错误表</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="settings.model 为空时，要求上游 /v1/models 恰好登记一个模型；多模型服务必须显式指定模型名。">
+  <h3>Q4. 上游服务有多个模型时，model 字段应？</h3>
+  <button class="quiz-option">留空即可</button>
+  <button class="quiz-option">任填名称</button>
+  <button class="quiz-option" data-correct="true">必须指定</button>
+  <button class="quiz-option">自动发现</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">6. 源码练习</h2>
+<ol>
+  <li>在 <code>mineru/model/vlm/client.py</code> 找到 <code>uses_native_async_vlm()</code>，回答：哪些配置组合走“原生异步”？</li>
+  <li>在 conda 环境里打开 <code>site-packages/mineru_vl_utils/vlm_client/base_client.py</code>并查看 <code>DEFAULT_SYSTEM_PROMPT</code>——它的值说明了“文档理解指令实际放在哪一侧”？</li>
+  <li>在 <code>mineru/model/registry.py</code> 找到 GGUF 仓库定义，写出 llama.cpp 路径下模型的两个必需文件名。</li>
+</ol>
+
+<h2 id="source">7. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../next/config.md">docs/next/config.md</a> — 「远程 VLM」一节：地址、模型名发现、并发与隐私语义。</li>
+  <li>配合阅读：<a href="../../../../mineru/model/vlm/client.py">mineru/model/vlm/client.py</a>、<a href="../../../../mineru/model/registry.py">mineru/model/registry.py</a>（权重仓库约定）。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0011-build-finetune-dataset.html">课程 11 · 构建微调数据集</a>——用 MinerU 自己的抽取接口捕获训练三元组。有任何概念卡住，直接问教师（agent）。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 10 · 参考：<a href="../reference/architecture-map.html">架构地图</a> · <a href="../reference/glossary.html">术语表</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

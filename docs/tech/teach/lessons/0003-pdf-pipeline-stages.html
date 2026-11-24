@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 03：PDF 流水线阶段 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0001-trace-a-pdf.html">← 课程 01</a>
+  <a href="0002-choose-the-right-tier.html">课程 02</a>
+  <a href="0004-results-and-rendering.html">课程 04 →</a>
+  <a href="../reference/architecture-map.html">架构地图</a>
+  <a href="../reference/tier-matrix.html">档位矩阵</a>
+  <a href="../reference/glossary.html">术语表</a>
+</nav>
+
+<p class="eyebrow">Lesson 03 · 深入</p>
+<h1>PDF 流水线：窗口内的阶段与回退</h1>
+<p class="lede">这节课只做一件事：能按顺序说出一个 PDF 窗口内部发生了什么——布局、原生文本、表格、公式、OCR、VLM、印章、裁图——并解释每个阶段的启用条件。</p>
+
+<div class="callout">
+  <strong>为什么学这个：</strong>解析质量问题的根因几乎都在这些阶段的顺序与回退规则里。改流水线之前，必须先知道现在是什么顺序、为什么。
+</div>
+
+<h2 id="window">1. 窗口</h2>
+<ul>
+  <li>PDF 按<strong>窗口</strong>处理，默认 <strong>64 页</strong>，可用 <code>MINERU_PROCESSING_WINDOW_SIZE</code> 调整。</li>
+  <li>窗口之间共享同一个 <code>PDFDocument</code> 与模型实例；页面图像与临时数组按窗口释放。</li>
+  <li>准备/收尾持有本地模型锁；<strong>VLM 推理期间释放锁</strong>，让其他文档可以使用小模型。</li>
+</ul>
+
+<h2 id="stages">2. 阶段顺序</h2>
+
+<div class="flow">
+  <div class="node dark"><strong>窗口准备</strong>渲染页面图 → 小模型 layout → 表格方向检测 → 原生表格优先</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>推理（按档位分叉）</strong>flash：OCR；medium：MFR/表格/OCR；high/xhigh：VLM 抽取 + 行内切片识别</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>正文回填</strong>PDF 文本层优先 → OCR 补齐 → 行级元数据 → 公式编号合并</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>收尾</strong>印章 OCR（medium/high）→ 视觉块裁图 → 释放窗口资源</div>
+</div>
+
+<h2 id="layout">3. 布局分析</h2>
+<ul>
+  <li>模型：PP-DocLayoutV2（Torch 或 ONNX），一次处理整窗。</li>
+  <li>输出每块的 <code>label</code>、<code>bbox</code>、<code>score</code>；label 与内部块类型的映射是<strong>显式表</strong>（<code>VLM_LAYOUT_LABEL_MAP</code>）。</li>
+  <li>layout 结果还要经过标题拆分、表格方向检测、原生表格优先，才会成为最终块。</li>
+</ul>
+
+<h2 id="native-text">4. 原生文本 vs OCR</h2>
+<pre><code># backend/analysis/pdf/text/content.py —— txt 模式优先用 PDF 文本层
+try:
+    page_char_count = pdf_page.get_char_count()
+except Exception:
+    page_char_count = None
+
+# 页面字符数不超阈值才尝试原生文本；扫描件退回 OCR
+if not isinstance(page_char_count, int) or page_char_count <= MAX_NATIVE_TEXT_CHARS_PER_PAGE:
+    evidence = prepare_text_evidence(
+        pdf_page,
+        excluded_script_regions=inline_math_regions,   # 行内公式区域排除
+        table_regions=table_regions,                   # 表格区域排除
+    )</code></pre>
+<ul>
+  <li>同一区域不会同时被“文本层 + 公式/表格”重复消费。</li>
+  <li>文本证据支持快照缓存（<code>PageSnapshotCache</code>），同页在布局与正文阶段复用，随后逐页释放。</li>
+</ul>
+
+<h2 id="ocr-mfr">5. OCR 与公式的启用矩阵</h2>
+<pre><code># backend/analysis/pdf/ocr.py —— 由 parse_mode 与 effort 决定
+def _build_ocr_det_type_and_mfr_enable(parse_mode, effort):
+    if effort == "medium":
+        return PIPELINE_DET_TYPE, True      # basic：跑完整 MFR
+    if parse_mode == "txt":
+        return VLM_TXT_DET_TYPE, False      # standard/advanced 文本模式：只补检测
+    return VLM_OCR_DET_TYPE, False          # standard/advanced ocr 模式：VLM 识别正文</code></pre>
+
+<table>
+  <thead><tr><th>档位</th><th>OCR det</th><th>OCR rec</th><th>MFR</th><th>表格</th><th>VLM</th></tr></thead>
+  <tbody>
+    <tr><td>basic (medium)</td><td>✅ 正文块</td><td>✅（ocr 模式）</td><td>✅</td><td>✅ 分类 + 批量</td><td>❌</td></tr>
+    <tr><td>standard (high)</td><td>✅</td><td>VLM</td><td>局部回退</td><td>✅（原生优先）</td><td>✅ 单步</td></tr>
+    <tr><td>advanced (xhigh)</td><td>✅</td><td>VLM</td><td>局部回退</td><td>✅（原生优先）</td><td>✅ 两步 + 图片分析</td></tr>
+  </tbody>
+</table>
+
+<h2 id="inline">6. 行内公式的 VLM 切片与回退</h2>
+<p>Standard/Advanced 的文本模式中，表外行内公式切片交给 VLM 文本识别（<code>batch_recognize_text</code>）；失败处理有严格分级：</p>
+<pre><code># model/vlm/text_recognition.py —— 不是所有错误都允许降级
+def raise_unrecoverable_text_error(error: Exception) -> None:
+    # 取消、引擎死亡、程序契约错误必须传播，不能降级成单片识别失败
+    if (is_fatal_engine_error(error) or isinstance(error, (
+        ClientClosedError, MemoryError, AssertionError, AttributeError,
+        TypeError, LookupError, NotImplementedError,
+    )) or (isinstance(error, RuntimeError) and not isinstance(error, ServerError))):
+        raise error</code></pre>
+<ul>
+  <li><strong>单片失败/空内容/定界符残缺</strong>：仅该片回退 MFR，并记录告警。</li>
+  <li><strong>取消、引擎死亡、契约错误</strong>：直接抛出，不静默降级。</li>
+  <li>可恢复的批量异常：逐片补试一次，保留已成功结果。</li>
+</ul>
+
+<div class="callout">
+  <strong>回退原则：</strong>“局部失败局部回退，全局失败全局报错”。回退仍无有效结果时报告错误。
+</div>
+
+<h2 id="rest">7. 其余阶段</h2>
+<ul>
+  <li><strong>印章</strong>：medium/high 用独立印章 OCR 模型；xhigh 由 VLM 结果补图片容器。</li>
+  <li><strong>视觉素材</strong>：<code>_attach_visual_block_images</code> 按块 bbox 裁剪页面图挂到 image/table/chart/equation 块。</li>
+  <li><strong>公式编号</strong>：编号块合并进相邻公式块（<code>optimize_hybrid_formula_number_blocks</code>），保证裁图包含编号区域。</li>
+  <li><strong>表格</strong>：basic 走“分类 → 无线批量 → 有线单表”；standard/advanced 文本模式先尝试 PDF 原生表格，复杂表回退模型。</li>
+</ul>
+
+<h2 id="quiz">8. 检索练习</h2>
+
+<div class="quiz" data-explanation="PDF 处理窗口默认 64 页，可用 MINERU_PROCESSING_WINDOW_SIZE 覆盖，非法值回退默认。">
+  <h3>Q1. PDF 处理窗口的默认大小是？</h3>
+  <button class="quiz-option" data-correct="true">64 页</button>
+  <button class="quiz-option">32 页</button>
+  <button class="quiz-option">100 页</button>
+  <button class="quiz-option">全部页</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="medium（basic 档）是唯一跑完整 MFR 的档位；high/xhigh 在文本模式下只对失败切片局部回退。">
+  <h3>Q2. 哪个档位运行完整公式识别（MFR）？</h3>
+  <button class="quiz-option">flash</button>
+  <button class="quiz-option" data-correct="true">basic</button>
+  <button class="quiz-option">standard</button>
+  <button class="quiz-option">advanced</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="Standard/Advanced 文本模式中，表外行内公式切片由 VLM 识别，失败时局部回退 MFR。">
+  <h3>Q3. 文本模式下行内公式默认由谁识别？</h3>
+  <button class="quiz-option" data-correct="true">VLM</button>
+  <button class="quiz-option">MFR</button>
+  <button class="quiz-option">table rec</button>
+  <button class="quiz-option">layout</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="窗口准备与收尾持有本地模型锁；VLM 推理等待期间显式释放锁，避免事件循环线程被同步锁卡住。">
+  <h3>Q4. VLM 推理期间，本地模型锁会？</h3>
+  <button class="quiz-option" data-correct="true">会释放</button>
+  <button class="quiz-option">不释放</button>
+  <button class="quiz-option">仅暂停</button>
+  <button class="quiz-option">被继承</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">9. 源码练习</h2>
+<ol>
+  <li>在 <code>mineru/backend/analysis/pdf/window.py</code> 找到窗口大小的环境变量名，并说出非法值的行为。</li>
+  <li>在 <code>mineru/backend/analysis/pdf/formulas.py</code> 找到行间公式回填的校验：如果一个 bbox 匹配到两个 equation 块会发生什么？</li>
+  <li>在 <code>mineru/backend/analysis/pdf/tables.py</code> 找到表格分类失败时的处理，并解释为什么它不阻断无线模型。</li>
+</ol>
+<p class="small muted">核对：<a href="../reference/tier-matrix.html">档位矩阵</a> 的“阶段行为差异”与你读到的启用矩阵应完全一致。</p>
+
+<h2 id="source">10. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../../mineru/backend/analysis/pdf/window.py">mineru/backend/analysis/pdf/window.py</a> — 窗口编排的唯一事实来源。</li>
+  <li>配合阅读：<a href="../../../next/tiers.md">docs/next/tiers.md</a>（切片回退规则）、<a href="../../../../mineru/model/vlm/text_recognition.py">mineru/model/vlm/text_recognition.py</a>（不可恢复错误清单）。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0004-results-and-rendering.html">课程 04 · 结果协议与九种渲染</a>。阶段顺序记不清时，回到 <a href="../reference/tier-matrix.html">档位矩阵</a> 复习；有疑问直接问教师（agent）。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 03 · 参考：<a href="../reference/tier-matrix.html">档位矩阵</a> · <a href="../reference/glossary.html">术语表</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

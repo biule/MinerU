@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考：命令速查 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="../lessons/0001-trace-a-pdf.html">← 课程 01</a>
+  <a href="../lessons/0002-choose-the-right-tier.html">课程 02</a>
+  <a href="architecture-map.html">架构地图</a>
+  <a href="tier-matrix.html">档位矩阵</a>
+  <a href="glossary.html">术语表</a>
+</nav>
+
+<p class="eyebrow">Reference · Commands</p>
+<h1>命令速查</h1>
+<p class="lede">安装、解析、文档库、服务、配置与诊断的常用命令。所有示例基于 MinerU 4.1.7。</p>
+
+<h2 id="install">1. 安装与版本</h2>
+<pre><code># 基础：ONNX + llama.cpp，CPU 可运行
+pip install -U "mineru>=4.0,<5"
+
+# 需要 Torch 小模型（GPU/MPS）
+pip install -U "mineru[torch]>=4.0,<5"
+
+# 需要 vLLM / LMDeploy / MLX
+pip install -U "mineru[full]>=4.0,<5"
+
+mineru --version
+mineru-kit --version</code></pre>
+
+<h2 id="stateless">2. 无状态解析（mineru-kit）</h2>
+<pre><code># 单文件 → Markdown（默认全部页）
+mineru-kit parse report.pdf -o report.md
+
+# 指定档位与页范围
+mineru-kit parse report.pdf -o report.md --tier standard --pages 1-10
+
+# 输出 Middle JSON
+mineru-kit parse report.pdf -o out.json --format middle_json
+
+# 打包 zip（含图片）
+mineru-kit parse report.pdf -o out.zip --format zip
+
+# 批量目录（输出必须是目录）
+mineru-kit parse ./papers -o ./out --format markdown
+
+# OCR 模式 / 关闭图片分析
+mineru-kit parse scan.pdf -o scan.md --ocr-mode ocr --disable-image-analysis
+
+# 远程服务
+mineru-kit parse report.pdf -o out.md --remote
+mineru-kit parse report.pdf -o out.md --remote-url http://host:8000 --api-key KEY</code></pre>
+<p class="small">默认 tier：PDF/图片 <code>standard</code>；原生格式（Office/EPUB/OFD/HTML/CSV）使用 <code>flash</code>，显式质量档位会报错。</p>
+
+<h2 id="doclib">3. 文档库（mineru）</h2>
+<pre><code># 首次阅读（默认前 10 页；输出 Markdown 到 stdout）
+mineru parse report.pdf
+
+# JSON 输出：状态 + 内容 + 续读信息
+mineru parse report.pdf --json
+
+# 整本 / 指定页 / 指定档位
+mineru parse report.pdf --pages all
+mineru parse report.pdf --pages 1-5,8
+mineru parse report.pdf --tier basic
+
+# 按 locator 读取
+mineru read "doc:ab12cd3/tier:standard/page:11"
+mineru read "doc:ab12cd3/tier:standard/page:4/block:7" --context 2
+mineru read "doc:ab12cd3/tier:standard/page:4" --format image
+
+# 搜索
+mineru search "revenue recognition"
+mineru find "annual report" --ext pdf
+
+# 发现与监听
+mineru scan ~/Documents/project
+mineru watch add ~/Documents
+mineru watch list
+mineru watch rescan ~/Documents
+
+# 缓存控制
+mineru parse report.pdf --force
+mineru invalidate report.pdf --tier standard
+mineru forget report.pdf
+
+# 状态检查
+mineru server status --json
+mineru show file report.pdf --json
+mineru list parses --status parsing</code></pre>
+
+<h2 id="services">4. 服务</h2>
+<pre><code># 自托管解析 API（默认 127.0.0.1:8000）
+mineru-kit api-server --host 127.0.0.1 --port 8000 --tier standard
+
+# 预加载模型 / 设置鉴权 / 保留期
+mineru-kit api-server --preload-models --api-key $MINERU_API_KEY
+mineru-kit api-server --retention-seconds 172800 --upload-dir /data/mineru-uploads
+
+# 远程 VLM（分离部署）
+mineru-kit api-server --tier standard --vlm-server-url http://127.0.0.1:30000/v1 \
+  --vlm-api-key $VLM_API_KEY --vlm-max-concurrency 32
+
+# 只做 VLM 推理（OpenAI 兼容）
+mineru-kit vlm-server --engine auto
+mineru-kit vlm-server --engine vllm --port 30000
+
+# 多 worker Router
+mineru-kit router --host 127.0.0.1 --port 8002 --worker-tier standard --worker-concurrency 1
+mineru-kit router --upstream-url http://10.0.0.11:8000 --upstream-url http://10.0.0.12:8000
+mineru-kit router --admin-api-key $ROUTER_ADMIN_KEY
+
+# 单文件同步包装
+mineru-kit file-parse-server
+
+# Web UI
+mineru-kit webui
+
+# Doclib 服务
+mineru server start
+mineru server status --json</code></pre>
+
+<h2 id="http">5. HTTP Tasks</h2>
+<pre><code># 创建任务（JSON 清单）
+curl -X POST http://127.0.0.1:8000/v1/tasks \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MINERU_API_KEY" \
+  -d '{"files":[{"name":"report.pdf"}],"tier":"standard"}'
+
+# 上传（PUT 返回的上传链接）
+curl -X PUT "$UPLOAD_URL" --upload-file report.pdf
+
+# 查询任务（含逐文件状态与结果链接）
+curl http://127.0.0.1:8000/v1/tasks/$TASK_ID \
+  -H "Authorization: Bearer $MINERU_API_KEY"
+
+# 取消
+curl -X POST http://127.0.0.1:8000/v1/tasks/$TASK_ID/cancel \
+  -H "Authorization: Bearer $MINERU_API_KEY"
+
+# 能力发现
+curl http://127.0.0.1:8000/v1/health
+curl http://127.0.0.1:8000/v1/tiers</code></pre>
+
+<h2 id="sdk">6. Python SDK</h2>
+<pre><code>from mineru.parser import MinerUParser, parse
+from mineru.parser.writer import FileBasedDataWriter
+from mineru.render import render, RenderFormat
+
+# 便捷函数
+result = parse("report.pdf", tier="standard", page_range="1-5")
+
+# 结果对象
+md = result.markdown()
+structured = result.structured_content()
+html = render(result.middle_json, RenderFormat.HTML)
+docx_bytes = render(result.middle_json, RenderFormat.DOCX)
+
+# 保存结果包（Markdown + Middle JSON + Structured Content + 图片）
+result.save(FileBasedDataWriter("output"))
+
+# 上下文管理与显式 VLM 配置
+from mineru.config import VlmConfig
+with MinerUParser(tier="flash", parse_mode="txt") as parser:
+    result = parser.parse("report.pdf", page_range="1-3")</code></pre>
+
+<h2 id="config">7. 配置</h2>
+<pre><code># 查看
+mineru config show
+mineru config show --json
+
+# 本地解析能力
+mineru config set parse_server.local.mode managed
+mineru config set parse_server.local.managed_tier standard
+
+# 自托管
+mineru config set parse_server.local.mode self_hosted
+mineru config set parse_server.local.self_hosted_url http://127.0.0.1:8000
+
+# 远端（仍需 --remote 才会上传）
+mineru config set parse_server.remote.api_key sk-...
+mineru parse report.pdf --remote
+
+# 解析规则
+mineru config parsing-rules add "*/papers/*" --tier standard --pages all
+mineru config parsing-rules list
+mineru config exclude-rules add "*/node_modules/*"</code></pre>
+
+<h2 id="env">8. 常用环境变量</h2>
+<table>
+  <thead><tr><th>变量</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td><code>MINERU_HOME</code></td><td>MinerU home，默认 <code>~/.mineru</code></td></tr>
+    <tr><td><code>MINERU_CONFIG</code></td><td>显式指定启动配置文件</td></tr>
+    <tr><td><code>MINERU_API_KEY</code></td><td>远端解析 API Key（仍需显式允许 remote）</td></tr>
+    <tr><td><code>MINERU_DEVICE_MODE</code></td><td>模型设备，如 <code>cuda:0</code>、<code>cpu</code></td></tr>
+    <tr><td><code>MINERU_MODEL_SMALL_BACKEND</code></td><td>小模型后端：<code>auto</code> / <code>onnx</code> / <code>torch</code></td></tr>
+    <tr><td><code>MINERU_MODEL_VLM_ENGINE</code></td><td>VLM 引擎：<code>auto</code> / <code>llama-cpp</code> / <code>vllm</code> / <code>lmdeploy</code> / <code>mlx</code></td></tr>
+    <tr><td><code>MINERU_MODEL_SOURCE</code></td><td>模型来源：<code>auto</code> / <code>huggingface</code> / <code>modelscope</code> / <code>local</code></td></tr>
+    <tr><td><code>MINERU_MODEL_VLM_SERVER_URL</code></td><td>远程 VLM 地址</td></tr>
+    <tr><td><code>MINERU_MODEL_VLM_API_KEY</code></td><td>远程 VLM Key</td></tr>
+    <tr><td><code>MINERU_LOG_LEVEL</code></td><td>全局日志级别</td></tr>
+    <tr><td><code>MINERU_PROCESSING_WINDOW_SIZE</code></td><td>PDF 处理窗口大小，默认 64</td></tr>
+  </tbody>
+</table>
+
+<h2 id="diagnostics">9. 诊断与模型</h2>
+<pre><code>mineru-kit hardware info       # 只读硬件诊断
+mineru-kit hardware detect     # 推荐档位
+mineru-kit models list
+mineru-kit models download --tier standard
+mineru-kit models verify
+
+# 日志
+# ~/.mineru/logs/doclib.log
+# ~/.mineru/logs/doclib.parse-server.stdout.log
+# ~/.mineru/logs/doclib.parse-server.stderr.log</code></pre>
+
+<h2 id="sources">来源</h2>
+<ul class="small">
+  <li><a href="../../../../README_zh-CN.md">README_zh-CN.md</a> — 用户命令与档位说明</li>
+  <li><a href="../../../next/config.md">docs/next/config.md</a> — 配置与优先级</li>
+  <li><a href="../../../next/sdk/parser.md">docs/next/sdk/parser.md</a> — SDK 契约</li>
+  <li><a href="../../../next/api/README.md">docs/next/api/README.md</a> — V1 API 端点</li>
+</ul>
+
+<p class="footer">MinerU 4.1.7 · 参考文档 · 命令行为以当前源码为准，有疑问随时向教师（agent）提问。</p>
+
+</div>
+</body>
+</html>

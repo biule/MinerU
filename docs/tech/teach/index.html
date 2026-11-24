@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MinerU 4.1 学习工作区</title>
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="MISSION.md">使命</a>
+  <a href="RESOURCES.md">资源</a>
+  <a href="NOTES.md">笔记</a>
+  <a href="reference/study-plan.html">学习路线</a>
+  <a href="reference/faq.html">常见问题</a>
+</nav>
+
+<p class="eyebrow">Teaching workspace</p>
+<h1>MinerU 4.1 学习工作区</h1>
+<p class="lede">目标：理解 MinerU 4.1.7 的架构与源码，能够安全地扩展这个 fork，并把解析能力交付成可评测、可部署的服务。课程按“先追踪、再决策、再做改动、最后验收上线”的顺序推进。</p>
+
+<div class="callout">
+  <strong>本版补充（参考 3.x 旧课程的教学方向）：</strong>在原 12 课基础上新增 5 课——模型运行时与 VLM 引擎（13）、批量流水线与字段提取（14）、小图 OCR 扩展（15）、微调验收与量化（16）、部署与运维（17）；并新增<a href="reference/study-plan.html">学习路线与自检</a>、<a href="reference/faq.html">常见问题</a>。旧课程只提供教学结构与应用视角，事实以 4.1.7 源码和 <code>docs/next/</code> 为准。
+</div>
+
+<h2 id="path">学习路径</h2>
+<table>
+  <thead><tr><th>阶段</th><th>课程</th><th>完成后你能</th></tr></thead>
+  <tbody>
+    <tr><td>0 定位</td><td>01</td><td>画出 PDF → MiddleJson 主链，找到改动落点</td></tr>
+    <tr><td>1 地基</td><td>01–04</td><td>追踪输入、选对档位、理解窗口阶段与结果协议</td></tr>
+    <tr><td>2 状态与服务</td><td>05–07</td><td>解释 Doclib 缓存、两阶段配置、Tasks 生命周期</td></tr>
+    <tr><td>3 扩展与排障</td><td>08–09</td><td>按清单做四类改动，按错误码定位故障</td></tr>
+    <tr><td>4 模型深挖</td><td>13</td><td>解释 VLM 引擎、运行时缓存、远程与生命周期</td></tr>
+    <tr><td>5 落地应用</td><td>14–15</td><td>做批量解析与字段抽取，处理小图 Layout 盲区</td></tr>
+    <tr><td>6 微调</td><td>10–12, 16</td><td>构造数据、接回模型、A/B 验收与量化</td></tr>
+    <tr><td>7 上线</td><td>17</td><td>部署进程拓扑、鉴权、容量、升级与回滚</td></tr>
+  </tbody>
+</table>
+<p class="small muted">完整路线、三种目标路线与每课自检标准见 <a href="reference/study-plan.html">学习路线与自检</a>。</p>
+
+<h2 id="lessons">课程</h2>
+<table>
+  <thead><tr><th>阶段</th><th>编号</th><th>课程</th><th>你将能够</th><th>时长</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>地基</td><td>01</td>
+      <td><a href="lessons/0001-trace-a-pdf.html">追踪一个 PDF：从输入到 MiddleJson</a></td>
+      <td>画出调用链，说出五个决策点，定位四个改动落点</td><td>30m</td>
+    </tr>
+    <tr>
+      <td>地基</td><td>02</td>
+      <td><a href="lessons/0002-choose-the-right-tier.html">选对档位：tier、effort 与引擎</a></td>
+      <td>按硬件与依赖选档，解释默认规则与不降级语义</td><td>30m</td>
+    </tr>
+    <tr>
+      <td>地基</td><td>03</td>
+      <td><a href="lessons/0003-pdf-pipeline-stages.html">PDF 流水线：窗口内的阶段与回退</a></td>
+      <td>按顺序复述窗口阶段，解释启用矩阵与回退分级</td><td>40m</td>
+    </tr>
+    <tr>
+      <td>地基</td><td>04</td>
+      <td><a href="lessons/0004-results-and-rendering.html">结果协议与九种渲染</a></td>
+      <td>区分三个对象边界，正确使用 render() 与 save()</td><td>30m</td>
+    </tr>
+    <tr>
+      <td>状态与服务</td><td>05</td>
+      <td><a href="lessons/0005-doclib-state-line.html">Doclib 状态线：缓存、排队与读取</a></td>
+      <td>解释按页缓存覆盖、批次复用、读取不建解析</td><td>35m</td>
+    </tr>
+    <tr>
+      <td>状态与服务</td><td>06</td>
+      <td><a href="lessons/0006-config-and-privacy.html">配置与隐私边界</a></td>
+      <td>掌握两阶段配置、优先级与上传许可不变量</td><td>30m</td>
+    </tr>
+    <tr>
+      <td>状态与服务</td><td>07</td>
+      <td><a href="lessons/0007-http-and-router.html">HTTP 服务与 Router</a></td>
+      <td>走完 Tasks 生命周期，理解 ID 不透明与逐文件完成</td><td>35m</td>
+    </tr>
+    <tr>
+      <td>扩展与排障</td><td>08</td>
+      <td><a href="lessons/0008-extend-safely.html">安全扩展清单</a></td>
+      <td>四种典型改动的完整清单与护栏五查</td><td>45m</td>
+    </tr>
+    <tr>
+      <td>扩展与排障</td><td>09</td>
+      <td><a href="lessons/0009-debugging.html">排障手册：错误码 → 根因 → 动作</a></td>
+      <td>按错误码定位阶段，读对日志，给出修复</td><td>40m</td>
+    </tr>
+    <tr>
+      <td>微调（选学）</td><td>10</td>
+      <td><a href="lessons/0010-finetune-overview.html">微调总览：VLM 在哪里、能改什么</a></td>
+      <td>定位模型调用点，判断所需的落地路径</td><td>30m</td>
+    </tr>
+    <tr>
+      <td>微调（选学）</td><td>11</td>
+      <td><a href="lessons/0011-build-finetune-dataset.html">构建微调数据集：捕获三元组</a></td>
+      <td>复刻推理输入分布，产出训练样本</td><td>40m</td>
+    </tr>
+    <tr>
+      <td>微调（选学）</td><td>12</td>
+      <td><a href="lessons/0012-serve-finetuned-model.html">服务化微调模型：接回推理链路</a></td>
+      <td>三条路径接入并用 standard 解析验证</td><td>40m</td>
+    </tr>
+    <tr>
+      <td>模型深挖</td><td>13</td>
+      <td><a href="lessons/0013-model-runtime-and-vlm-engine.html">模型运行时与 VLM 引擎调用链</a></td>
+      <td>解释引擎选择、缓存键、远程无回退、生命周期与排障</td><td>60m</td>
+    </tr>
+    <tr>
+      <td>落地应用</td><td>14</td>
+      <td><a href="lessons/0014-batch-pipeline-and-field-extraction.html">批量流水线与字段提取</a></td>
+      <td>按类型选档、批量解析、字段抽取、失败隔离与汇总</td><td>70m</td>
+    </tr>
+    <tr>
+      <td>落地应用</td><td>15</td>
+      <td><a href="lessons/0015-small-image-ocr-extension.html">小图 OCR：从 Layout 盲区到专用 API</a></td>
+      <td>区分漏检与识别错，安全直调 OCR 并封装受控端点</td><td>60m</td>
+    </tr>
+    <tr>
+      <td>微调验收</td><td>16</td>
+      <td><a href="lessons/0016-finetune-evaluation-and-quantization.html">微调验收：A/B 评测与量化部署</a></td>
+      <td>固定协议、分项指标、配对区间、量化验收与回滚</td><td>70m</td>
+    </tr>
+    <tr>
+      <td>上线</td><td>17</td>
+      <td><a href="lessons/0017-deployment-and-operations.html">部署与运维：从能跑到能长期跑</a></td>
+      <td>进程拓扑、启动顺序、鉴权、容量、日志、升级与回滚</td><td>60m</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="routes">三条推荐路线</h2>
+<table>
+  <thead><tr><th>目标</th><th>顺序</th><th>优先练习</th></tr></thead>
+  <tbody>
+    <tr><td><strong>维护 fork / 改流水线</strong></td><td>01 → 02 → 03 → 04 → 08 → 09 → 13 → 17</td><td>08 改动清单、09 故障注入、13 引擎排障</td></tr>
+    <tr><td><strong>做单证解析应用</strong></td><td>01 → 02 → 04 → 05 → 06 → 14 → 15 → 17</td><td>14 批处理与字段命中率、15 小图对照实验</td></tr>
+    <tr><td><strong>微调并上线</strong></td><td>01 → 02 → 03 → 10 → 11 → 12 → 16 → 17</td><td>11 数据捕获、12 端到端接入、16 A/B 报告</td></tr>
+  </tbody>
+</table>
+
+<h2 id="reference">参考文档</h2>
+<table>
+  <thead><tr><th>文档</th><th>用途</th></tr></thead>
+  <tbody>
+    <tr><td><a href="reference/architecture-map.html">架构地图</a></td><td>分层、三条调用链、模块职责、改动落点</td></tr>
+    <tr><td><a href="reference/tier-matrix.html">档位矩阵</a></td><td>tier/effort、阶段行为、默认选择、引擎与硬件</td></tr>
+    <tr><td><a href="reference/glossary.html">术语表</a></td><td>统一术语定义（后续课程以此为准）</td></tr>
+    <tr><td><a href="reference/commands.html">命令速查</a></td><td>安装、CLI、SDK、HTTP、配置、诊断</td></tr>
+    <tr><td><a href="reference/study-plan.html">学习路线与自检</a></td><td>阶段计划、三条路线、每课证据标准、复习节奏</td></tr>
+    <tr><td><a href="reference/faq.html">常见问题</a></td><td>使用、服务、模型、微调、开发高频现象与结论</td></tr>
+  </tbody>
+</table>
+
+<h2 id="how">怎么用</h2>
+<ol>
+  <li>用浏览器打开课程 HTML（可以直接双击文件）；所有页面离线可读，不依赖 CDN。</li>
+  <li>先读“知识”部分，再完成检索练习（quiz）。答错会立即显示解释。</li>
+  <li>完成“源码练习”或“动手挑战”后，再进入下一课。不要跳课；08–09 依赖前七课。</li>
+  <li>参考文档用于复习和速查；它们可以打印。</li>
+  <li>任何不清楚的地方，直接问你的教师（agent）——贴出代码行、命令输出或题目即可。</li>
+</ol>
+
+<h2 id="mission">使命与进度</h2>
+<ul>
+  <li><a href="MISSION.md">MISSION.md</a> — 为什么学、成功标准、边界</li>
+  <li><a href="learning-records/">learning-records/</a> — 已确认的认知与先验知识</li>
+  <li><a href="RESOURCES.md">RESOURCES.md</a> — 可信来源与社区</li>
+  <li><a href="NOTES.md">NOTES.md</a> — 教学偏好与工作环境</li>
+</ul>
+
+<p class="footer">MinerU 4.1.7 · 学习工作区 · 参考文档可打印，课程可反复回看。</p>
+
+</div>
+</body>
+</html>

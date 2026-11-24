@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考：档位矩阵 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="../lessons/0001-trace-a-pdf.html">← 课程 01</a>
+  <a href="../lessons/0002-choose-the-right-tier.html">课程 02</a>
+  <a href="architecture-map.html">架构地图</a>
+  <a href="glossary.html">术语表</a>
+  <a href="commands.html">命令速查</a>
+</nav>
+
+<p class="eyebrow">Reference · Tiers</p>
+<h1>档位矩阵</h1>
+<p class="lede">四档解析的产品语义、内部 effort、模型引擎与默认选择规则。用于回答“该选哪档”和“为什么选了这档”。</p>
+
+<h2 id="mapping">1. 档位 → effort</h2>
+<table>
+  <thead><tr><th>tier</th><th>effort</th><th>PDF 执行方式</th><th>典型用途</th></tr></thead>
+  <tbody>
+    <tr><td><code>flash</code> 极速解析</td><td><code>flash</code></td><td><code>txt</code>：DocVortex 原生 PDF 模型；<code>ocr</code>：布局小模型 + OCR</td><td>发现、预览、索引；不做最终阅读质量</td></tr>
+    <tr><td><code>basic</code> 基础解析</td><td><code>medium</code></td><td>小模型：layout + OCR + MFR + 表格</td><td>私有本地阅读、资源受限</td></tr>
+    <tr><td><code>standard</code> 标准解析</td><td><code>high</code></td><td>小模型 + VLM 单步抽取（带布局块）</td><td>默认高质量阅读</td></tr>
+    <tr><td><code>advanced</code> 高级解析</td><td><code>xhigh</code></td><td>小模型 + VLM 两步抽取 + 图片分析</td><td>难文档、最高质量</td></tr>
+  </tbody>
+</table>
+
+<h2 id="behaviour">2. 阶段行为差异</h2>
+<table>
+  <thead><tr><th>阶段</th><th>flash+txt</th><th>flash+ocr</th><th>basic</th><th>standard</th><th>advanced</th></tr></thead>
+  <tbody>
+    <tr><td>PDF 文本层</td><td>✅</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td></tr>
+    <tr><td>小模型 layout</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+    <tr><td>OCR det</td><td>❌</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+    <tr><td>OCR rec</td><td>❌</td><td>✅</td><td>✅（ocr 模式）</td><td>VLM</td><td>VLM</td></tr>
+    <tr><td>MFR 公式</td><td>❌</td><td>❌</td><td>✅</td><td>局部回退</td><td>局部回退</td></tr>
+    <tr><td>表格模型</td><td>原生</td><td>✅</td><td>✅</td><td>✅（原生优先）</td><td>✅（原生优先）</td></tr>
+    <tr><td>VLM 抽取</td><td>❌</td><td>❌</td><td>❌</td><td>✅ 单步</td><td>✅ 两步</td></tr>
+    <tr><td>图片分析</td><td>❌</td><td>❌</td><td>❌</td><td>❌</td><td>✅</td></tr>
+    <tr><td>印章 OCR</td><td>❌</td><td>❌</td><td>✅</td><td>✅</td><td>❌（VLM 补容器）</td></tr>
+  </tbody>
+</table>
+
+<h2 id="defaults">3. 各入口的默认选择</h2>
+<table>
+  <thead><tr><th>场景</th><th>默认规则</th></tr></thead>
+  <tbody>
+    <tr><td>Python <code>parse()</code> / <code>MinerUParser</code></td><td>默认 <code>standard</code>；不接受 <code>tier=None/auto</code>；原生格式实际输出 flash/txt</td></tr>
+    <tr><td><code>mineru-kit parse</code></td><td>PDF/图片默认 <code>standard</code>；原生单文件未指定 tier 时用 <code>flash</code>，显式质量档位报错；批量中的原生文件归一为 <code>flash</code></td></tr>
+    <tr><td>Tasks / HTTP SDK / file-parse</td><td>按 <code>standard → basic → flash → advanced</code>；只有 Advanced 时选中它；原生文件固定 <code>flash</code></td></tr>
+    <tr><td>Gradio 初始档位</td><td>与 Tasks 使用同一选择函数；外部 API 依据 <code>/v1/tiers</code></td></tr>
+    <tr><td>Doclib 主动质量解析</td><td>PDF/图片按 <code>standard → basic</code>；缺少可用默认档位则报错</td></tr>
+    <tr><td>Doclib 已缓存读取</td><td>未指定 tier 时选可读的 <code>advanced → standard → basic</code>；不自动新建解析</td></tr>
+    <tr><td>Doclib parsing rule</td><td><code>standard → basic → flash</code></td></tr>
+  </tbody>
+</table>
+
+<h2 id="engines">4. 模型引擎与硬件</h2>
+<table>
+  <thead><tr><th>Extra</th><th>模型引擎</th><th>安装</th></tr></thead>
+  <tbody>
+    <tr><td>（基础）</td><td>ONNX + llama.cpp</td><td><code>pip install mineru</code></td></tr>
+    <tr><td><code>torch</code></td><td>ONNX + PyTorch + llama.cpp</td><td><code>pip install "mineru[torch]"</code>（Apple Silicon 基础包已包含）</td></tr>
+    <tr><td><code>full</code></td><td>ONNX + PyTorch + llama.cpp + vLLM / LMDeploy / MLX</td><td><code>pip install "mineru[full]"</code></td></tr>
+  </tbody>
+</table>
+
+<table>
+  <thead><tr><th>tier</th><th>模型引擎</th><th>模型下载</th><th>最低内存</th><th>加速</th></tr></thead>
+  <tbody>
+    <tr><td>basic</td><td>ONNX</td><td>~0.8 GB</td><td>2 GB</td><td>CPU 可用</td></tr>
+    <tr><td>basic</td><td>PyTorch</td><td>~0.8 GB</td><td>8 GB</td><td>建议 GPU/MPS</td></tr>
+    <tr><td>standard / advanced</td><td>ONNX + llama.cpp</td><td>~2 GB</td><td>8 GB</td><td>CPU 可用；建议 Vulkan</td></tr>
+    <tr><td>standard / advanced</td><td>PyTorch + llama.cpp</td><td>~2 GB</td><td>16 GB</td><td>需要 GPU/MPS，8 GB+ 显存</td></tr>
+    <tr><td>standard / advanced</td><td>PyTorch + vLLM/LMDeploy/MLX</td><td>~3 GB</td><td>16 GB</td><td>需要 GPU/MPS，8 GB+ 显存</td></tr>
+  </tbody>
+</table>
+
+<h2 id="service-tier">5. 服务档位上限</h2>
+<p><code>api-server --tier</code> 与 WebUI 的 <code>--tier</code> 控制<strong>最高开放档位</strong>，并包含较低档位：</p>
+<table>
+  <thead><tr><th>上限</th><th>可用解析档位</th></tr></thead>
+  <tbody>
+    <tr><td><code>flash</code></td><td>flash</td></tr>
+    <tr><td><code>basic</code></td><td>flash, basic</td></tr>
+    <tr><td><code>standard</code></td><td>flash, basic, standard</td></tr>
+    <tr><td><code>advanced</code></td><td>flash, basic, standard, advanced</td></tr>
+  </tbody>
+</table>
+<p class="small">注意：服务档位是<strong>部署能力上限</strong>，不是单次请求选择的档位；<code>auto</code> 是启动模式，不是第五个解析档位。</p>
+
+<h2 id="pitfalls">6. 常见误区</h2>
+<ul>
+  <li><strong>“tier 就是模型大小”</strong>：tier 决定是否使用 VLM、是否两阶段、是否做图片分析。</li>
+  <li><strong>“flash 一定最差”</strong>：原生格式（Office/EPUB/OFD/HTML/CSV）只有 flash，质量由格式解析决定。</li>
+  <li><strong>“Standard 与 Advanced 是两套模型”</strong>：两者共用部署模型；Advanced 增加推理投入与图片分析。</li>
+  <li><strong>“显式档位不受支持时会自动降级”</strong>：不会；显式请求不支持的档位返回错误。</li>
+  <li><strong>“配置了远端地址就会上传”</strong>：不会；必须显式 <code>--remote</code> 或规则允许。</li>
+</ul>
+
+<h2 id="sources">来源</h2>
+<ul class="small">
+  <li><a href="../../../next/tiers.md">docs/next/tiers.md</a> — 档位与选择入口</li>
+  <li><a href="../../../../mineru/parser/tier.py">mineru/parser/tier.py</a>、<a href="../../../../mineru/types.py">mineru/types.py</a></li>
+  <li><a href="../../../../README_zh-CN.md">README_zh-CN.md</a> — Quality Tiers 与 Model Engines</li>
+  <li><a href="../../../../mineru/backend/analysis/pdf/ocr.py">mineru/backend/analysis/pdf/ocr.py</a> — OCR/MFR 启用规则</li>
+</ul>
+
+<p class="footer">MinerU 4.1.7 · 参考文档 · 有疑问随时向教师（agent）提问。</p>
+
+</div>
+</body>
+</html>

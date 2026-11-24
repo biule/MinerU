@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 04：结果协议与渲染 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0003-pdf-pipeline-stages.html">← 课程 03</a>
+  <a href="0005-doclib-state-line.html">课程 05 →</a>
+  <a href="../reference/glossary.html">术语表</a>
+  <a href="../reference/commands.html">命令速查</a>
+  <a href="../reference/architecture-map.html">架构地图</a>
+</nav>
+
+<p class="eyebrow">Lesson 04 · 协议</p>
+<h1>结果协议与九种渲染</h1>
+<p class="lede">这节课只做一件事：能区分 ModelJson、MiddleJson、ParseResult 三个对象的边界，说出九种输出格式的归属，并正确使用 <code>save()</code> 与 <code>render()</code>。</p>
+
+<div class="callout">
+  <strong>为什么学这个：</strong>协议是公共契约。弄错对象边界（比如把 ModelJson 交给下游），产出的集成会直接坏掉。
+</div>
+
+<h2 id="three">1. 三个对象</h2>
+
+<div class="flow-h">
+  <div class="node"><strong>ModelJson</strong>内部原始结果<br>raw pages + page_index_map</div>
+  <div class="arrow-h"></div>
+  <div class="node accent"><strong>MiddleJson</strong>公开语义树<br>schema 2.0</div>
+  <div class="arrow-h"></div>
+  <div class="node"><strong>ParseResult</strong>只持有 middle_json<br>渲染 / 保存</div>
+</div>
+
+<table>
+  <thead><tr><th>对象</th><th>是否公开</th><th>内容</th></tr></thead>
+  <tbody>
+    <tr><td>ModelJson</td><td>❌ 仅内部</td><td>raw pages、<code>page_index_map</code>、metadata、extensions；只服务分析与后处理</td></tr>
+    <tr><td>MiddleJson</td><td>✅</td><td>有序 <code>PageInfo</code>（page_idx + blocks）；带 schema 身份 <code>docvortex.middle</code>、版本 <code>2.0</code></td></tr>
+    <tr><td>ParseResult</td><td>✅</td><td>唯一字段 <code>middle_json</code>；<code>pages</code> 是属性；不持有 PDF 对象</td></tr>
+  </tbody>
+</table>
+
+<h2 id="schema">2. MiddleJson 的身份字段</h2>
+<ul>
+  <li><strong>schema / schema_version</strong>：协议身份（JSON 键为 <code>schema</code>，Python 属性为 <code>schema_id</code>）。</li>
+  <li><strong>metadata</strong>：文件类型、生产者（<code>producer.name = "mineru"</code>、版本）、源文档属性。</li>
+  <li><strong>extensions["mineru"]</strong>：实际执行的 <code>tier</code> 与 <code>parse_mode</code>，严格校验（<code>extra="forbid"</code>），不记录 effort 或请求值。</li>
+  <li><strong>pages</strong>：每页 <code>page_idx</code>（内部 0 起）+ blocks；自然语言 InlineSpan 不携带字体或几何信息。</li>
+</ul>
+<pre><code># integrations/docvortex.py —— 记录“实际执行”，不是“请求值”
+EFFORT_TO_TIER = {"flash": "flash", "medium": "basic", "high": "standard", "xhigh": "advanced"}
+
+class MinerUMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    tier: Literal["flash", "basic", "standard", "advanced"]
+    parse_mode: Literal["txt", "ocr"]</code></pre>
+
+<h2 id="render">3. 九种渲染</h2>
+<table>
+  <thead><tr><th>格式</th><th>返回</th><th>归属</th></tr></thead>
+  <tbody>
+    <tr><td>Markdown / HTML / LaTeX</td><td><code>str</code></td><td>DocVortex</td></tr>
+    <tr><td>DOCX / EPUB / PDF</td><td><code>bytes</code></td><td>DocVortex</td></tr>
+    <tr><td>Structured Content</td><td><code>dict</code>（无 schema 身份）</td><td>DocVortex</td></tr>
+    <tr><td>Content List V1 / V2</td><td><code>list[dict]</code> / <code>list[list[dict]]</code></td><td><strong>MinerU</strong></td></tr>
+  </tbody>
+</table>
+<p class="small">PDF 输出布局由 <code>PdfLayout</code> 控制：<code>AUTO</code>（默认，有几何保留原始布局）、<code>ORIGINAL</code>（仅原始）、<code>REFLOW</code>（仅语义重排）。</p>
+
+<h2 id="save">4. 结果包</h2>
+<pre><code># parser/base.py —— 先序列化全部内容，再写文件；缺素材在写出前失败
+def save(self, writer: DataWriter) -> None:
+    from docvortex.export import materialize_middle, validate_materialized_assets
+
+    # 在副本上外置素材，不修改原语义树
+    middle_json, assets = materialize_middle(self.middle_json)
+    validate_materialized_assets(middle_json, assets)
+    exported = ParseResult(middle_json=middle_json)
+    text_files = {
+        "markdown.md": exported.markdown(),
+        "middle_json.json": exported.to_json(),
+        "structured_content.json": ...,
+    }
+    for path, content in text_files.items():
+        writer.write_string(path, content)
+    for path, payload in sorted(assets.items()):
+        writer.write(path, payload)</code></pre>
+
+<div class="callout">
+  <strong>规则：</strong>渲染与保存<strong>不得修改原语义树</strong>；不依赖已关闭的 PDFium 对象或源文件；单独的 <code>middle_json.json</code> 不能替代带素材的结果包。
+</div>
+
+<h2 id="quiz">5. 检索练习</h2>
+
+<div class="quiz" data-explanation="extensions['mineru'] 记录实际执行的 tier 与 parse_mode；effort 不进入公开元数据。">
+  <h3>Q1. extensions["mineru"] 记录的是？</h3>
+  <button class="quiz-option" data-correct="true">实际执行</button>
+  <button class="quiz-option">用户请求</button>
+  <button class="quiz-option">引擎名称</button>
+  <button class="quiz-option">模型版本</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="Content List V1/V2 是 MinerU 专属输出；其余七种通用 renderer 和导出属于 DocVortex。">
+  <h3>Q2. 九种输出中，哪一类由 MinerU 独立拥有？</h3>
+  <button class="quiz-option" data-correct="true">Content List V1/V2</button>
+  <button class="quiz-option">Markdown</button>
+  <button class="quiz-option">DOCX</button>
+  <button class="quiz-option">Structured Content</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="Save 先物化并校验素材，再序列化、再写文件；缺素材会在写出前失败，不产出貌似完整的包。">
+  <h3>Q3. save() 缺少素材时会？</h3>
+  <button class="quiz-option" data-correct="true">写出前失败</button>
+  <button class="quiz-option">写出后补齐</button>
+  <button class="quiz-option">自动裁剪</button>
+  <button class="quiz-option">静默跳过</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="Structured Content 是派生内容字典，没有 schema 身份；协议身份属于 MiddleJson。">
+  <h3>Q4. Structured Content 有独立 schema 身份吗？</h3>
+  <button class="quiz-option">有独立</button>
+  <button class="quiz-option" data-correct="true">没有</button>
+  <button class="quiz-option">继承用</button>
+  <button class="quiz-option">可选有</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">6. 源码练习</h2>
+<ol>
+  <li>在 <code>mineru/parser/base.py</code> 找到 <code>to_dict</code> 对 PDF 的特殊处理：哪个字段不进入独立结构 JSON，为什么？</li>
+  <li>在 <code>mineru/parser/task_outputs.py</code> 说出四种 Tasks 输出格式，以及“单一 docx/html”时的返回差异。</li>
+  <li>在 <code>mineru/render/api.py</code> 数一数 render() 的分支数，并确认每个分支对 options 类型的校验。</li>
+</ol>
+<p class="small muted">核对：任务 2 的答案在 <code>mineru/task_types.py</code>（<code>default/docx/html/latex</code>）。</p>
+
+<h2 id="source">7. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../next/sdk/parse-result.md">docs/next/sdk/parse-result.md</a> — ParseResult 的权威契约。</li>
+  <li>配合阅读：<a href="../../../../mineru/parser/base.py">mineru/parser/base.py</a>、<a href="../../../../mineru/integrations/docvortex.py">mineru/integrations/docvortex.py</a>、<a href="../../../next/middle-json/README.md">docs/next/middle-json/</a>。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0005-doclib-state-line.html">课程 05 · Doclib 状态线</a>。协议字段有疑问时，先查 <a href="../reference/glossary.html">术语表</a>，再问教师（agent）。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 04 · 参考：<a href="../reference/glossary.html">术语表</a> · <a href="../reference/commands.html">命令速查</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

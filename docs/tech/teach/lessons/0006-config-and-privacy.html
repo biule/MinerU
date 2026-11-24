@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 06：配置与隐私边界 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0005-doclib-state-line.html">← 课程 05</a>
+  <a href="0007-http-and-router.html">课程 07 →</a>
+  <a href="../reference/commands.html">命令速查</a>
+  <a href="../reference/architecture-map.html">架构地图</a>
+  <a href="../reference/glossary.html">术语表</a>
+</nav>
+
+<p class="eyebrow">Lesson 06 · 配置</p>
+<h1>配置与隐私边界</h1>
+<p class="lede">这节课只做一件事：能说清两阶段配置（启动前 / 运行时）、优先级顺序，以及“配置了远端 ≠ 允许上传”的不变量。</p>
+
+<div class="callout">
+  <strong>为什么学这个：</strong>隐私不变量是 MinerU 的硬约束。新增任何“默认走远端”的便捷行为都是事故；任何配置改动都要先过这一关。
+</div>
+
+<h2 id="two-phase">1. 两阶段配置</h2>
+<table>
+  <thead><tr><th>阶段</th><th>存储</th><th>例子</th><th>为什么</th></tr></thead>
+  <tbody>
+    <tr><td>启动前</td><td><code>$MINERU_HOME/config.yaml</code> + 环境变量 + 默认值</td><td>UDS/TCP、DB 路径、模型目录、日志、VLM 连接</td><td>server 还没起来，读不了 SQLite</td></tr>
+    <tr><td>运行时</td><td>SQLite <code>config</code> 表 + watches / rules 表</td><td><code>parse_server.local.mode</code>、远端 URL/Key</td><td>server 起来后才可读写</td></tr>
+  </tbody>
+</table>
+<ul>
+  <li><code>MINERU_HOME</code> 默认 <code>~/.mineru</code>；默认配置文件 <code>$MINERU_HOME/config.yaml</code>；<code>MINERU_CONFIG</code> 显式指定。</li>
+  <li><code>Config()</code> 只构造默认值；首次 <code>get_config()</code> 读取并缓存进程默认配置，之后不自动刷新。</li>
+  <li>启动前文件配置与 SQLite 配置<strong>不定义同一 key</strong>，设计上避免互相覆盖。</li>
+</ul>
+
+<h2 id="precedence">2. 优先级</h2>
+<pre><code>1. 当前命令显式参数        # --tier standard、--remote
+2. 当前进程环境变量        # MINERU_MODEL_VLM_SERVER_URL 等
+3. 文件配置 / SQLite 配置
+4. 内置默认值</code></pre>
+<p class="small muted">环境变量按字段路径覆盖任意强类型字段，例如 <code>MINERU_LLM_AIDED_FEATURES_TITLE_LEVELING</code>。</p>
+
+<h2 id="kv">3. 运行时 KV 关键项</h2>
+<table>
+  <thead><tr><th>key</th><th>默认值</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>parse_server.local.mode</code></td><td><code>disabled</code></td><td><code>disabled / managed / self_hosted</code></td></tr>
+    <tr><td><code>parse_server.local.managed_tier</code></td><td><code>standard</code></td><td>托管服务能力上限</td></tr>
+    <tr><td><code>parse_server.remote.url</code></td><td><code>https://mineru.net/api</code></td><td>远端解析地址</td></tr>
+    <tr><td><code>parse_server.remote.api_key</code></td><td>无</td><td>未配置时回退 <code>MINERU_API_KEY</code></td></tr>
+  </tbody>
+</table>
+
+<h2 id="privacy">4. 隐私不变量</h2>
+<pre><code># 存在 remote URL / API Key ≠ 允许上传
+# 上传必须由当前请求或 parsing-rule 显式允许
+
+# parse_queue_svc.py：远端限制在请求层强制执行
+if remote and ext not in TIERED_PARSE_EXTENSIONS:
+    raise InvalidRequestError("remote_unsupported_for_file_type", ...)
+if remote and tier == "flash":
+    raise InvalidRequestError("tier_unsupported_for_remote", ...)</code></pre>
+<ul>
+  <li>没有显式远端配置，<strong>不把文档上传到远程解析服务</strong>。</li>
+  <li><code>--remote</code> 只支持 PDF/图片，且不支持 <code>flash</code>。</li>
+  <li>API Key 优先读取 SQLite 配置；未配置才回退环境变量 <code>MINERU_API_KEY</code>。</li>
+  <li>环境变量不改变“是否允许 remote 上传”的判断。</li>
+</ul>
+
+<div class="callout">
+  <strong>判断准则：</strong>任何“自动上传”的行为都是 bug。宁可报 <code>quality_tier_unavailable</code> 让用户选择，也不要静默把文档送出去。
+</div>
+
+<h2 id="other">5. 其他要点</h2>
+<ul>
+  <li><strong>Doclib 凭证</strong>：<code>doclib.auth.token</code> 首启动时用配置锁写入文件；<code>MINERU_DOCLIB_AUTH_TOKEN</code> 覆盖文件值且不回写秒；以 <code>SecretStr</code> 保存，repr/JSON 脱敏，不进运行时 <code>/configs</code>。</li>
+  <li><strong>远程 VLM</strong>：<code>model.vlm.server_url</code> 非空即远程；远程模式不自动回退本地 VLM。</li>
+  <li><strong>LLM 增强</strong>：两个功能默认关；任一启用时连接三项必须非空。</li>
+  <li><strong>日志</strong>：<code>log.level</code> 管 Loguru 默认 sink；<code>doclib.log.level</code> 是 Doclib 进程局部覆盖；api-server <code>--log-level</code> 只覆盖服务侧 stdlib 日志。</li>
+</ul>
+
+<h2 id="quiz">6. 检索练习</h2>
+
+<div class="quiz" data-explanation="运行时行为优先级：显式参数 > 环境变量 > 文件/SQLite 配置 > 默认值。">
+  <h3>Q1. 优先级最高的是？</h3>
+  <button class="quiz-option">环境变量</button>
+  <button class="quiz-option">配置文件</button>
+  <button class="quiz-option">默认数值</button>
+  <button class="quiz-option" data-correct="true">命令参数</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="存在 remote 配置不等于允许上传；上传必须由当前请求 --remote 或规则显式允许。">
+  <h3>Q2. 配置了远端 URL 和 Key 后，会自动上传文档吗？</h3>
+  <button class="quiz-option">自动上传</button>
+  <button class="quiz-option" data-correct="true">不会上传</button>
+  <button class="quiz-option">仅质量</button>
+  <button class="quiz-option">仅阅读时</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="UDS 不可用的平台上（Windows）TCP loopback 是 auto 模式的 fallback，默认 127.0.0.1:15980。">
+  <h3>Q3. Windows 上 Doclib 的传输回退是？</h3>
+  <button class="quiz-option">命名管道</button>
+  <button class="quiz-option">共享内存</button>
+  <button class="quiz-option" data-correct="true">本地回环</button>
+  <button class="quiz-option">仅限文件</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="LLM 增强的两个功能都默认关闭；启用时 api_key/base_url/model 必须全部非空。">
+  <h3>Q4. LLM 增强（llm_aided）默认状态是？</h3>
+  <button class="quiz-option" data-correct="true">两个关闭</button>
+  <button class="quiz-option">标题开启</button>
+  <button class="quiz-option">合并开启</button>
+  <button class="quiz-option">全部开启</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">7. 场景练习</h2>
+<ol>
+  <li>用户说“我配了 API Key，为什么解析还是本地跑的？”——用不变量解释，并给出正确的远程使用命令。</li>
+  <li>CI 环境只能用环境变量：怎样在不落盘的前提下启用远程 VLM？写出变量名。</li>
+  <li><code>parse_server.remote.api_key</code> 与 <code>MINERU_API_KEY</code> 同时存在时，哪个生效？</li>
+</ol>
+<p class="small muted">核对：场景 3 见“API Key 优先级”表格（SQLite 配置优先于环境变量）。</p>
+
+<h2 id="source">8. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../next/config.md">docs/next/config.md</a> — 两阶段配置与优先级的权威说明。</li>
+  <li>配合阅读：<a href="../../../../mineru/config.py">mineru/config.py</a>（加载与校验）、<a href="../../../../mineru/doclib/services/parse_queue_svc.py">parse_queue_svc.py</a>（请求层远端限制）。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0007-http-and-router.html">课程 07 · HTTP 服务与 Router</a>。配置项存疑时先查 <a href="../reference/commands.html">命令速查</a> 的环境变量表。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 06 · 参考：<a href="../reference/commands.html">命令速查</a> · <a href="../reference/glossary.html">术语表</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

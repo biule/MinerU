@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 09：排障手册 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0008-extend-safely.html">← 课程 08</a>
+  <a href="0010-finetune-overview.html">课程 10 →</a>
+  <a href="../reference/commands.html">命令速查</a>
+  <a href="../reference/glossary.html">术语表</a>
+  <a href="../reference/tier-matrix.html">档位矩阵</a>
+</nav>
+
+<p class="eyebrow">Lesson 09 · 综合</p>
+<h1>排障手册：错误码 → 根因 → 动作</h1>
+<p class="lede">这节课只做一件事：给定一个错误码或现象，能定位到阶段、读对日志、给出正确修复。这是检验前八课是否真正内化的实战关。</p>
+
+<h2 id="codes">1. 错误码矩阵</h2>
+<table>
+  <thead><tr><th>错误码</th><th>内部类型 / HTTP</th><th>根因</th><th>动作</th></tr></thead>
+  <tbody>
+    <tr><td><code>server_not_running</code></td><td>api_error / 500</td><td>Doclib 未启动</td><td><code>mineru server start</code></td></tr>
+    <tr><td><code>quality_tier_unavailable</code></td><td>engine_error / 503</td><td>无 basic/standard 引擎</td><td>启动本地 parse-server / <code>--remote</code> / 显式 <code>flash</code></td></tr>
+    <tr><td><code>no_engine</code></td><td>engine_error / 503</td><td>本地 parse-server 禁用</td><td><code>config set parse_server.local.mode managed</code></td></tr>
+    <tr><td><code>tier_mismatch</code></td><td>invalid_request_error / 400</td><td>服务不支持该档位</td><td>查 <code>/v1/tiers</code> / <code>server status --json</code></td></tr>
+    <tr><td><code>tier_unsupported_for_file_type</code></td><td>invalid_request_error / 400</td><td>对原生格式请求质量档位</td><td>用 <code>flash</code></td></tr>
+    <tr><td><code>file_type_unsupported</code></td><td>invalid_request_error / 400</td><td>扩展名不在边界内</td><td>转格式或扩展 DocVortex</td></tr>
+    <tr><td><code>page_range_invalid</code></td><td>invalid_request_error / 400</td><td>非 PDF 页范围 / 语法错</td><td>用 <code>1-5</code>、<code>r1</code>、<code>all</code></td></tr>
+    <tr><td><code>parse_wait_timeout</code></td><td>timeout_error / 408</td><td>等待超时（解析仍在进行）</td><td>增大 <code>--wait</code> 或稍后 <code>read</code> 缓存</td></tr>
+    <tr><td><code>remote_timeout</code> / <code>remote_unreachable</code></td><td>api_error / 503</td><td>远端不可达</td><td>查网络/URL/Key；或回本地</td></tr>
+    <tr><td><code>invalid_api_key</code></td><td>authentication_error / 401</td><td>远端或自托管 Key 错误</td><td>更新 <code>parse_server.*.api_key</code></td></tr>
+    <tr><td><code>parse_server_dependency_missing</code></td><td>invalid_request_error / 400</td><td>档位依赖未安装</td><td><code>mineru[torch]</code> / <code>mineru[full]</code></td></tr>
+    <tr><td><code>parse_server_model_not_ready</code></td><td>invalid_request_error / 400</td><td>模型未就绪</td><td><code>mineru-kit models download --tier standard</code></td></tr>
+    <tr><td><code>not_cached</code> / <code>tier_not_cached</code></td><td>invalid_request_error / 404</td><td>读取无缓存且不新建解析</td><td>先 <code>parse</code></td></tr>
+    <tr><td><code>parse_failed</code></td><td>engine_error / 503</td><td>解析内部异常</td><td>看日志的阶段计时与告警</td></tr>
+  </tbody>
+</table>
+<p class="small">公开 Tasks 错误结构只有 <code>error.code / message / param</code>（<strong>不输出 type</strong>）；内部 CLI/Doclib 异常另有 type 分类。按 <strong>HTTP 状态 + code</strong> 分支，不要解析 message，也不要把 <code>retryable</code> / <code>user_action</code> 当成现有响应字段。file_parse 使用自己的错误结构。</p>
+
+<h2 id="stages">2. 从现象反推阶段</h2>
+<table>
+  <thead><tr><th>现象</th><th>先看</th><th>常见根因</th></tr></thead>
+  <tbody>
+    <tr><td>输出公式为空</td><td><code>pdf.inline_vlm</code> 告警</td><td>切片回退失败；换 <code>ocr</code> 模式复核</td></tr>
+    <tr><td>表格混乱</td><td>是否 txt + 原生表格</td><td>扫描件应走 OCR 档位；看方向检测日志</td></tr>
+    <tr><td>页数不一致</td><td>页范围重写日志</td><td>坏页占位（PageInfo 空块）；源文档损坏</td></tr>
+    <tr><td>GPU 未使用</td><td><code>resolve_small_model_backend</code></td><td>Torch 未装或设备不可用 → 回落 ONNX/CPU</td></tr>
+    <tr><td>内存暴涨</td><td>窗口大小</td><td><code>MINERU_PROCESSING_WINDOW_SIZE</code> 被调大；大页图</td></tr>
+    <tr><td>首个请求很慢</td><td>模型加载</td><td>未 <code>--preload-models</code>；模型首下载</td></tr>
+    <tr><td>Doclib 读取报错</td><td>缓存状态</td><td><code>list parses</code> 查批次状态与档位</td></tr>
+    <tr><td>搜索搜不到</td><td>FTS 更新门槛</td><td>内容只在质量档位后建索引；flash 片段不足以回答</td></tr>
+  </tbody>
+</table>
+
+<h2 id="logs">3. 日志落点</h2>
+<pre><code>~/.mineru/logs/doclib.log                     # Doclib 应用日志
+~/.mineru/logs/doclib.access.log              # HTTP 访问
+~/.mineru/logs/doclib.parse-server.stdout.log # 托管解析服务 stdout
+~/.mineru/logs/doclib.parse-server.stderr.log # 托管解析服务 stderr
+
+# 阶段计时（stage_timer）：pdf.layout / pdf.ocr_detection / pdf.formulas
+#                                        / pdf.table_recognition / pdf.inline_vlm / pdf.image_assets
+# 速度日志：model_list infer finished, pages=N, cost=…s, speed=… page/s</code></pre>
+<ul>
+  <li>全局级别 <code>log.level</code>/<code>MINERU_LOG_LEVEL</code> 管 Loguru 默认 sink。</li>
+  <li>诊断配置：<code>mineru config show --json</code>；<code>server status --json</code>（含 managed_tier）。</li>
+  <li>环境快照：<code>mineru-kit hardware info</code>（只读，不发错）。</li>
+</ul>
+
+<h2 id="quiz">4. 检索练习</h2>
+
+<div class="quiz" data-explanation="本地 quality 解析无引擎时报 quality_tier_unavailable；可选动作是启动本地服务、--remote 或显式 flash。">
+  <h3>Q1. 无 basic/standard 引擎时的错误码是？</h3>
+  <button class="quiz-option">no_engine</button>
+  <button class="quiz-option">parse_failed</button>
+  <button class="quiz-option">server_not_running</button>
+  <button class="quiz-option" data-correct="true">quality_tier_unavailable</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="parse_wait_timeout 时解析仍在后台进行；重新运行同一命令可继续等待，或稍后 read 缓存。">
+  <h3>Q2. 解析等待超时后，后台批次会？</h3>
+  <button class="quiz-option">马上取消</button>
+  <button class="quiz-option">立即删除</button>
+  <button class="quiz-option" data-correct="true">仍在执行</button>
+  <button class="quiz-option">转为失败</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="公开错误只有 code/message/param；客户端按 HTTP 状态与 code 分支，不解析 message，也不假定存在 retryable/user_action。">
+  <h3>Q3. 客户端应该基于哪个字段分支处理？</h3>
+  <button class="quiz-option">提示文字</button>
+  <button class="quiz-option">请求编号</button>
+  <button class="quiz-option" data-correct="true">错误代码</button>
+  <button class="quiz-option">时间戳值</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="输出公式为空时，先看 pdf.inline_vlm 的切片告警与局部回退，再决定是否换 ocr 模式或排查 MFR。">
+  <h3>Q4. 输出正文公式丢失时先检查？</h3>
+  <button class="quiz-option">存储空间</button>
+  <button class="quiz-option">网络代理</button>
+  <button class="quiz-option">文件权限</button>
+  <button class="quiz-option" data-correct="true">切片告警</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">5. 实战练习</h2>
+<p>在你自己的环境里执行（环境已就绪：conda <code>mineru</code> + editable 安装）：</p>
+<ol>
+  <li>故意拔掉引擎：<code>mineru config set parse_server.local.mode disabled</code>，然后 <code>mineru parse 样例.pdf --json</code>，抄下完整 <code>error</code> 对象，并解释三个字段。</li>
+  <li>故意用小窗口：<code>MINERU_PROCESSING_WINDOW_SIZE=8 mineru-kit parse 样例.pdf -o /tmp/x.md</code>，对照日志中的窗口计划行。</li>
+  <li>用一个原生文件验证档位边界：<code>mineru-kit parse notes.docx -o notes.md --tier standard</code>，抄下错误码。</li>
+</ol>
+<p class="small muted">把三段输出贴给教师（agent），教师据此记录你的掌握证据。</p>
+
+<h2 id="source">6. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../../mineru/errors.py">mineru/errors.py</a> — 全部错误码 → 类型 → HTTP 状态的映射表。</li>
+  <li>配合阅读：<a href="../../../next/errors.md">docs/next/errors.md</a>、<a href="../../../next/workflows.md">docs/next/workflows.md</a>（生命周期语句）。</li>
+</ul>
+
+<div class="callout">
+  <strong>完成标志：</strong>三个实战练习都做完并贴出结果 → 教师（agent）会写入 <a href="../learning-records/">learning-records</a>。之后可按目标继续：微调走 <a href="0010-finetune-overview.html">10–12 + 16</a>；改运行时走 <a href="0013-model-runtime-and-vlm-engine.html">13</a>；做应用走 <a href="0014-batch-pipeline-and-field-extraction.html">14–15</a>；上线走 <a href="0017-deployment-and-operations.html">17</a>。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 09 · 参考：<a href="../reference/commands.html">命令速查</a> · <a href="../reference/glossary.html">术语表</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

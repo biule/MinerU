@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 11：构建微调数据集 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0010-finetune-overview.html">← 课程 10</a>
+  <a href="0012-serve-finetuned-model.html">课程 12 →</a>
+  <a href="../reference/glossary.html">术语表</a>
+  <a href="../reference/commands.html">命令速查</a>
+</nav>
+
+<p class="eyebrow">Lesson 11 · 微调系列 2/3</p>
+<h1>构建微调数据集：捕获（图，指令，目标）三元组</h1>
+<p class="lede">这节课只做一件事：能复现 MinerU 真实调用模型的输入形态——裁剪图 + 按块类型的 prompt + 输出约定——并据此写出自己的数据捕获脚本，产出（image, prompt, completion）三元组。</p>
+
+<div class="callout">
+  <strong>本课立场：</strong>微调数据必须<strong>匹配推理时的输入分布</strong>。MinerU 推理时给模型的从来不是整页原图 + 通用问题，而是“按块裁剪 + 类型专属 prompt + 采样参数”；数据集偏离这个分布，微调就会白做。
+</div>
+
+<h2 id="contract">1. 推理时的真实输入形态</h2>
+
+<div class="flow">
+  <div class="node dark"><strong>页面图</strong>VLM 收到的原始输入（xhigh 还有布局块列表）</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>prepare_for_extract</strong>按块 bbox 裁剪 → 角度旋转 → resize 到上限 → PNG 字节（http-client）</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>prompt 选择</strong>按 block.type 查表：table/equation/image/text</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>模型输出</strong>文本（表格=HTML、公式=LaTeX、图=分析文本）→ post_process</div>
+</div>
+
+<pre><code># mineru_vl_utils/mineru_client.py —— prepare_for_extract 的实质（简化）
+for idx, block in enumerate(blocks):
+    if block.type in skip_list:
+        continue                                  # not_extract_list / 图片分析关闭等
+    x1, y1, x2, y2 = block.bbox                   # 0–1 归一化坐标
+    block_image = image.crop((x1*w, y1*h, x2*w, y2*h))
+    if block.angle in [90, 180, 270]:
+        block_image = block_image.rotate(block.angle, expand=True)
+    block_image = self.resize_by_need(block_image) # 约束到模型输入上限
+    if self.backend == "http-client":
+        block_image = get_png_bytes(block_image)   # 远程模式传 PNG 字节
+    prompts.append(self.prompts.get(block.type) or self.prompts["[default]"])
+    sampling_params.append(...)</code></pre>
+
+<div class="callout">
+  <strong>三个必须复刻的细节：</strong>① bbox 是 0–1 归一化后乘页面尺寸再裁剪；② 角度不为 0 时先旋转再送入；③ 输出尺寸有上限（<code>resize_by_need</code>）。训练数据若不复刻这些预处理，模型学到的将是另一套分布。
+</div>
+
+<h2 id="capture">2. 数据捕获脚本骨架</h2>
+<p>思路：用同一个 <code>MinerUClient</code> 跑普通解析，但在 <code>_predict</code> 之前截获 (裁剪图, prompt, 采样参数)，让人工标注/更强模型生成目标输出。</p>
+<pre><code># tools/finetune_capture.py —— 捕获三元组的可执行骨架（Python 3.11+）
+"""从 MinerU 的 standard 档解析过程中捕获 (image, prompt, params) 三元组。
+
+原理：MinerUClient.helper.prepare_for_extract() 是所有抽取路径
+（content_extract / extract_with_layout / two_step_extract）的必经点，
+在它返回后、真正调用模型前落盘，即可拿到与推理完全一致的输入。
+"""
+import json
+from pathlib import Path
+from PIL import Image
+
+from mineru_vl_utils import MinerUClient          # 与 MinerU 运行时同一客户端
+from mineru_vl_utils.structs import ContentBlock
+
+CAPTURE_DIR = Path("finetune_data")
+CAPTURE_DIR.mkdir(exist_ok=True)
+manifest_path = CAPTURE_DIR / "manifest.jsonl"
+
+
+def capture(client: MinerUClient, page_image: Image.Image,
+            blocks: list[ContentBlock], *, source: str, page_no: int) -> int:
+    """把一次抽取的全部块输入落到磁盘，返回样本数。"""
+    block_images, prompts, params, indices = client.helper.prepare_for_extract(
+        page_image, blocks
+    )
+    samples = []
+    for image, prompt, sampled_at, idx in zip(block_images, prompts, params, indices):
+        case_name = f"{source}_p{page_no}_b{idx}"
+        image_path = CAPTURE_DIR / f"{case_name}.png"
+        # http-client 模式拿到的是 PNG 字节，本地模式是 PIL Image
+        (image_path.write_bytes if isinstance(image, bytes) else image.save)(image_path)
+        samples.append({
+            "id": case_name,
+            "source": source,
+            "page": page_no,
+            "block_idx": idx,
+            "block_type": blocks[idx].type,
+            "bbox": list(blocks[idx].bbox),
+            "angle": blocks[idx].angle,
+            "prompt": prompt,                      # 与推理逐字节一致
+            "sampling": str(sampled_at),
+            "image": image_path.name,
+            "completion": None,                    # 人工标注 / 强模型生成后回填
+        })
+    with manifest_path.open("a", encoding="utf-8") as f:
+        for s in samples:
+            f.write(json.dumps(s, ensure_ascii=False) + "\n")
+    return len(samples)</code></pre>
+<p class="small muted">接入方式 A（侵入）：<code>pip install -e</code> 的 fork 里直接在 <code>window.py</code> 的 <code>_process_pdf_window</code> 调 <code>capture()</code>；接入方式 B（无侵入）：包一个小脚本，用 <code>MinerUClient.batch_extract_with_layout</code> 喂你的页面与布局块。</p>
+
+<h2 id="targets">3. 目标输出（completion）的来源</h2>
+<table>
+  <thead><tr><th>来源</th><th>适用</th><th>注意</th></tr></thead>
+  <tbody>
+    <tr><td>人工标注</td><td>小而精（数百条起步）</td><td>质量的天花板；建立标注约定再动手</td></tr>
+    <tr><td>更强模型蒸馏</td><td>规模化起步</td><td>让强模型在<strong>同样的裁剪图 + prompt</strong> 下产出，避免分布漂移</td></tr>
+    <tr><td>PDF 文本层对齐</td><td>文本块</td><td>复用 MinerU 的文本证据逻辑：排除公式/表格区域</td></tr>
+    <tr><td>合成渲染</td><td>表格/公式</td><td>渲染 HTML/LaTeX → 截图 → 以渲染结果为 completion</td></tr>
+  </tbody>
+</table>
+<p class="small">每类块目标的格式约定即推理输出约定：<strong>表格 = HTML、行间公式 = LaTeX、普通文本 = 原文</strong>（带公式定界符的行内切片拆成文本与行内公式）。</p>
+
+<h2 id="format">4. 训练样本格式</h2>
+<pre><code># manifest.jsonl 的一行，补全 completion 后即为一条训练样本
+{"id": "paper_p3_b12", "block_type": "table", "prompt": "\nTable Recognition:",
+ "image": "paper_p3_b12.png", "completion": "&lt;table&gt;&lt;tr&gt;&lt;td&gt;…&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;"}
+
+# 常见训练框架消费形态（chat 模板示例）
+{"messages": [
+  {"role": "system",    "content": "You are a helpful assistant."},
+  {"role": "user",      "content": "&lt;image&gt;\nTable Recognition:"},   # &lt;image&gt; 占位
+  {"role": "assistant", "content": "&lt;table&gt;…&lt;/table&gt;"}]}</code></pre>
+<ul>
+  <li><strong>system prompt</strong> 推理时是固定的 <code>"You are a helpful assistant."</code>——训练时保持一致，不要另起炉灶。</li>
+  <li>采样参数（presence/frequency penalty）不进训练；它们影响推理解码，不影响权重学习目标。</li>
+  <li>划分：留出块级别验证集（同文档的块不跨集合），防止同文档过拟合泄漏。</li>
+</ul>
+
+<h2 id="quiz">5. 检索练习</h2>
+
+<div class="quiz" data-explanation="bbox 在 prepare_for_extract 里是 0–1 归一化值乘页面宽高后裁剪；数据集必须复刻同一坐标约定。">
+  <h3>Q1. 布局块 bbox 的坐标单位是？</h3>
+  <button class="quiz-option">像素整数</button>
+  <button class="quiz-option">毫米单位</button>
+  <button class="quiz-option" data-correct="true">归一比例</button>
+  <button class="quiz-option">点数单位</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="tables 的 completion 是 HTML；公式的 completion 是 LaTeX；这与推理 post_process 的输出约定一致。">
+  <h3>Q2. 表格块的目标输出格式是？</h3>
+  <button class="quiz-option">纯文本</button>
+  <button class="quiz-option">Markdown</button>
+  <button class="quiz-option">坐标列表</button>
+  <button class="quiz-option" data-correct="true">HTML</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="推理时 system prompt 是 'You are a helpful assistant.'，训练时保持一致才能对齐分布。">
+  <h3>Q3. 训练时的 system prompt 应当？</h3>
+  <button class="quiz-option">自定义加强</button>
+  <button class="quiz-option">完全省略</button>
+  <button class="quiz-option" data-correct="true">保持一致</button>
+  <button class="quiz-option">改为空串</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="验证集应按文档划分（同文档的块不跨集合），否则同文档的样式泄漏会虚高指标。">
+  <h3>Q4. 验证集划分的正确粒度是？</h3>
+  <button class="quiz-option">按块划分</button>
+  <button class="quiz-option">按页划分</button>
+  <button class="quiz-option" data-correct="true">按文档划</button>
+  <button class="quiz-option">按类划分</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">6. 动手练习</h2>
+<ol>
+  <li>把 <code>tools/finetune_capture.py</code> 骨架跑通：解析一个 3 页 PDF，确认 <code>manifest.jsonl</code> 里每行都有 image + prompt。</li>
+  <li>手工标注 10 条 <code>[default]</code>（text）样本，用 <code>PDF 文本层对齐</code>的方式生成 completion，检查与裁剪图内容逐字一致。</li>
+  <li>统计你的 manifest：每种 block_type 各多少条？少于 50 条的类型先不要进训练集（记进 NOTES）。</li>
+</ol>
+
+<h2 id="source">7. 主源</h2>
+<ul>
+  <li><strong>首选：</strong>已安装的 <code>mineru_vl_utils/mineru_client.py</code>（conda 环境 site-packages）——<code>prepare_for_extract</code> 与 <code>DEFAULT_PROMPTS</code> 是输入分布的唯一事实。</li>
+  <li>配合阅读：<a href="../../../../mineru/model/vlm/contracts.py">mineru/model/vlm/contracts.py</a>（抽取协议）、<a href="../../../../mineru/backend/analysis/pdf/window.py">window.py</a>（调用点）。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0012-serve-finetuned-model.html">课程 12 · 服务化微调模型</a>——把训练完的权重接回 MinerU。捕获脚本的接入位置想不清楚时，问教师（agent）。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 11 · 参考：<a href="../reference/glossary.html">术语表</a> · <a href="../reference/commands.html">命令速查</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

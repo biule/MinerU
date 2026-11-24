@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>第 12 课：微调数据构造 + LLaMA-Factory 实操</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      if (window.mermaid) {
+        mermaid.initialize({ startOnLoad: true, theme: 'default', securityLevel: 'loose' });
+      }
+    });
+  </script>
+  <style>
+    .mermaid { text-align: center; margin: 1.25rem 0; font-size: 0.9em; }
+    .curl-block { background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0; font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 0.78em; line-height: 1.55; white-space: pre; overflow-x: auto; }
+    .compare-table { border-collapse: collapse; margin: 1rem 0; width: 100%; }
+    .compare-table th, .compare-table td { border: 1px solid #e2e8f0; padding: 0.55rem 0.75rem; text-align: left; font-size: 0.9em; vertical-align: top; }
+    .compare-table th { background: #f1f5f9; font-weight: 600; }
+    .highlight-green { background: #d1fae5; border-left: 3px solid #10b981; padding: 0.5rem 0.75rem; margin: 0.75rem 0; }
+    .highlight-red { background: #fee2e2; border-left: 3px solid #ef4444; padding: 0.5rem 0.75rem; margin: 0.75rem 0; }
+    .highlight-amber { background: #fef3c7; border-left: 3px solid #f59e0b; padding: 0.5rem 0.75rem; margin: 0.75rem 0; }
+    .dir-tree { background: #1e293b; color: #e2e8f0; border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0; font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 0.82em; line-height: 1.6; white-space: pre; }
+    .step-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem 1.25rem; margin: 0.75rem 0; }
+    .step-card h4 { margin-top: 0; color: #1e40af; }
+    .weight-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.6rem; margin: 1rem 0; }
+    .weight-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.75rem 1rem; text-align: center; }
+    .weight-card .bytes { font-size: 1.5em; font-weight: 700; color: #1e40af; }
+    .weight-card .label { font-size: 0.82em; color: #64748b; margin-top: 0.2rem; }
+  </style>
+</head>
+<body>
+
+<h1>第 12 课：微调数据构造 + LLaMA-Factory 实操</h1>
+
+<p class="meta">
+  <span>2026-07-27</span>
+  <span>阅读时间：50 分钟</span>
+  <span>目标：理解模型权重的本质，掌握为 MinerU VLM 构造微调数据的完整方法，用 LLaMA-Factory 跑通第一次 LoRA 训练</span>
+</p>
+
+<div class="callout info">
+  <strong>本节课你将学会</strong>
+  <p>理解"权重"到底是什么——从浮点数矩阵到 safetensors 文件的完整链路<br>
+  搞清全参微调 vs LoRA 的本质区别，以及为什么 LoRA 是单卡微调的首选<br>
+  为 MinerU 的两步推理（Layout + Content）分别构造训练数据<br>
+  用 LLaMA-Factory 从零跑通一次 LoRA 微调：环境 → 数据 → YAML → 训练 → 导出<br>
+  把微调后的模型接回 MinerU，验证效果</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>1. 前置知识：模型"权重"到底是什么</h2>
+<!-- ============================================================ -->
+
+<p>第 11 课反复提到"权重"这个词，但没展开解释。这一节把它彻底讲清楚——这是理解微调的前提。</p>
+
+<h3>1.1 权重 = 神经网络里的可学习参数</h3>
+
+<p>一个神经网络由很多层（Layer）组成，每一层做一次数学变换。以最简单的线性层为例：</p>
+
+<div class="curl-block">y = x · W + b
+
+x：输入向量（比如 4096 个浮点数）
+W：权重矩阵（比如 4096×4096 个浮点数）  ← 这就是"权重"
+b：偏置向量（4096 个浮点数）              ← 这也是"权重"的一部分</div>
+
+<p>训练的过程就是不断调整 W 和 b 里的值，让输出 y 越来越接近正确答案。这些值就是<strong>参数（Parameters）</strong>，也叫<strong>权重（Weights）</strong>。</p>
+
+<p>MinerU 用的 <code>MinerU2.5-Pro-2605-1.2B</code>，1.2B = <strong>12 亿个参数</strong>。每一个参数是一个浮点数，所以：</p>
+
+<div class="highlight-green">
+  <strong>12 亿参数 × 每个占用字节数 = 模型文件大小</strong><br>
+  12 亿 × 2 字节 (FP16/BF16) ≈ 2.4 GB 的纯权重数据<br>
+  12 亿 × 4 字节 (FP32) ≈ 4.8 GB 的纯权重数据
+</div>
+
+<h3>1.2 不同精度的权重</h3>
+
+<p>同一个数字可以用不同的精度存储——精度越高，占空间越大，但计算越准确：</p>
+
+<div class="weight-grid">
+  <div class="weight-card">
+    <div class="bytes">4 字节</div>
+    <div class="label">FP32（全精度）<br>训练时常用</div>
+  </div>
+  <div class="weight-card">
+    <div class="bytes">2 字节</div>
+    <div class="label">FP16 / BF16（半精度）<br>推理最常用，省一半</div>
+  </div>
+  <div class="weight-card">
+    <div class="bytes">1 字节</div>
+    <div class="label">int8（量化）<br>推理加速，精度微降</div>
+  </div>
+  <div class="weight-card">
+    <div class="bytes">0.5 字节</div>
+    <div class="label">int4（量化）<br>极端压缩，精度明显下降</div>
+  </div>
+</div>
+
+<p>MinerU 的模型分发时用的是 BF16，<strong>每个参数 2 字节</strong>。如果你下载的 <code>.safetensors</code> 文件总大小约 2.4 GB，说明你拿到的是 BF16 权重。</p>
+
+<h3>1.3 模型文件 ≠ 只有权重</h3>
+
+<p>一个能跑起来的模型至少需要这些文件：</p>
+
+<table class="compare-table">
+  <tr><th>文件</th><th>内容</th><th>如果缺失会怎样</th></tr>
+  <tr>
+    <td><code>model-00001-of-00002.safetensors</code><br><code>model-00002-of-00002.safetensors</code></td>
+    <td>12 亿个浮点数——模型的"知识"</td>
+    <td>无法推理，相当于只有脑细胞但没有脑结构</td>
+  </tr>
+  <tr>
+    <td><code>config.json</code></td>
+    <td>网络架构定义：多少层、每层多大、激活函数类型</td>
+    <td>transformers 不知道用什么类加载，直接报错</td>
+  </tr>
+  <tr>
+    <td><code>tokenizer.json</code> / <code>vocab.json</code></td>
+    <td>词表：把文字切成 token 的规则</td>
+    <td>文字无法转换成模型能理解的数字</td>
+  </tr>
+  <tr>
+    <td><code>preprocessor_config.json</code></td>
+    <td>图片怎么 resize、归一化参数</td>
+    <td>图片预处理参数不对，输出乱码</td>
+  </tr>
+</table>
+
+<div class="callout info">
+  <strong>为什么用 .safetensors 而不是 .bin（Pickle）？</strong>
+  <p>Pickle 是 Python 的序列化格式，加载时<strong>可以执行任意代码</strong>——恶意模型文件能在你 import 时窃取数据。safetensors 是纯数据格式，不包含可执行代码，加载更快，且支持内存映射（mmap）——不用一次读完整个文件。HuggingFace 现在默认用 safetensors 就是这个原因。</p>
+</div>
+
+<h3>1.4 权重矩阵怎么被"训练"</h3>
+
+<p>训练的本质就三步循环：</p>
+
+<div class="mermaid">
+graph LR
+  A["① 前向传播<br>输入 × 权重 → 预测"] --> B["② 计算 Loss<br>预测 vs 标准答案 差距"]
+  B --> C["③ 反向传播<br>算梯度 → 更新权重"]
+  C --> A
+  style A fill:#dbeafe,stroke:#3b82f6
+  style B fill:#fef3c7,stroke:#f59e0b
+  style C fill:#d1fae5,stroke:#10b981
+</div>
+
+<p>每次循环中，每个权重参数都往"让 Loss 变小"的方向挪一点点。这个"挪多少、往哪挪"由<strong>梯度（Gradient）</strong>和<strong>学习率（Learning Rate）</strong>共同决定：</p>
+
+<div class="curl-block">W_new = W_old - learning_rate × gradient</div>
+
+<p>12 亿个参数，每个都这样更新——所以训练需要巨大的算力。</p>
+
+<!-- ============================================================ -->
+<h2>2. 微调 = 改权重：三种改变方式</h2>
+<!-- ============================================================ -->
+
+<p>有了上面的基础，理解微调就很容易了。微调就是从一个<strong>已经训练好的模型</strong>（基座模型）出发，用你自己的数据继续训练，让权重向你的场景倾斜。</p>
+
+<h3>2.1 三种方式对比</h3>
+
+<table class="compare-table">
+  <tr><th>方式</th><th>改多少参数</th><th>显存需求</th><th>数据量</th><th>训练速度</th></tr>
+  <tr>
+    <td><strong>全参微调</strong></td>
+    <td>全部 12 亿个</td>
+    <td>≥4×A100 (80GB)</td>
+    <td>万页级</td>
+    <td>慢（几天）</td>
+  </tr>
+  <tr>
+    <td><strong>LoRA</strong>（低秩适配）</td>
+    <td>约 100-200 万个<br>（仅为全量的 0.01-0.1%）</td>
+    <td>24GB 单卡</td>
+    <td>500-3000 页</td>
+    <td>快（几小时）</td>
+  </tr>
+  <tr>
+    <td><strong>冻结 + 分类头</strong></td>
+    <td>只在最后加几层</td>
+    <td>很小</td>
+    <td>很少</td>
+    <td>很快</td>
+  </tr>
+</table>
+
+<h3>2.2 LoRA 为什么能用这么少参数？</h3>
+
+<p>LoRA 的核心思想：<strong>不改原始权重，而是额外挂一个小的"修正矩阵"</strong>。</p>
+
+<div class="mermaid">
+graph LR
+  subgraph "原始权重（冻结不动）"
+    W["W (4096×4096)<br>≈ 1600 万个参数"]
+  end
+  subgraph "LoRA 增量（只训练这个）"
+    A["A (4096×16)<br>≈ 6.5 万参数"] --> B["B (16×4096)<br>≈ 6.5 万参数"]
+  end
+  X[输入 x] --> W
+  X --> A
+  B --> P[+]
+  W --> P
+  P --> Y[输出 y]
+
+  style W fill:#e2e8f0,stroke:#94a3b8
+  style A fill:#dbeafe,stroke:#3b82f6
+  style B fill:#dbeafe,stroke:#3b82f6
+</div>
+
+<div class="curl-block">原始：y = x · W
+LoRA：y = x · W  +  x · A · B
+       ↑ 冻结不动   ↑ 只训练这俩小矩阵</div>
+
+<p>把 W (4096×4096 ≈ 1600 万参数) 的改动压缩成 A (4096×16) + B (16×4096) ≈ <strong>13 万个参数</strong>。r=16 就是你指定的这个"压缩维度"（rank）。</p>
+
+<table class="compare-table">
+  <tr><th>r 值</th><th>可训练参数</th><th>显存</th><th>表达能力</th></tr>
+  <tr><td>r=8</td><td>约 6.5 万 / 层</td><td>最低</td><td>够用小修小补</td></tr>
+  <tr><td>r=16</td><td>约 13 万 / 层</td><td>适中</td><td>大多数场景最性价比</td></tr>
+  <tr><td>r=32</td><td>约 26 万 / 层</td><td>更高</td><td>大幅改动时用</td></tr>
+  <tr><td>r=64</td><td>约 52 万 / 层</td><td>接近全参</td><td>逼近全参效果但省显存</td></tr>
+</table>
+
+<div class="callout tip">
+  <strong>实践经验</strong>
+  <p>对 MinerU VLM 这种 1.2B 的小模型，r=16 挂在 q_proj / v_proj / o_proj 上，24GB 单卡能跑 batch_size=2。效果已经能覆盖"新版式适配""特定表格格式修正"等常见需求。</p>
+</div>
+
+<!-- ============================================================ -->
+<h2>3. 微调目标回顾：你要训练什么</h2>
+<!-- ============================================================ -->
+
+<p>第 11 课已经讲清：MinerU 的 VLM 做<strong>两步推理</strong>。微调数据也必须分别覆盖这两步。</p>
+
+<div class="mermaid">
+graph TB
+  A[整页文档图片<br>resize 到 1036×1036] --> B["Step 1: Layout Detection<br>输出所有 block 的坐标+类型"]
+  B --> C["Step 2: Content Extraction<br>对每个 block 裁图 → 识别文字/表格/公式"]
+  C --> D[最终 Markdown / JSON 输出]
+
+  style B fill:#fee2e5,stroke:#ef4444
+  style C fill:#dbeafe,stroke:#3b82f6
+</div>
+
+<!-- ============================================================ -->
+<h2>4. Step 1 数据构造：Layout Detection</h2>
+<!-- ============================================================ -->
+
+<h3>4.1 输出格式</h3>
+
+<p>Layout 检测的输出是一串<strong>特殊 token</strong>，描述图片中每个区域的坐标和类型：</p>
+
+<div class="curl-block">&lt;|box_start|&gt;x1 y1 x2 y2&lt;|box_end|&gt;&lt;|ref_start|&gt;block_type&lt;|ref_end|&gt;(&lt;|rotate_up|&gt;)?(txt_contd_tgt)?</div>
+
+<table class="compare-table">
+  <tr><th>Token</th><th>含义</th></tr>
+  <tr><td><code>&lt;|box_start|&gt;</code> / <code>&lt;|box_end|&gt;</code></td><td>一对标记，围住一个布局块的边界框</td></tr>
+  <tr><td><code>x1 y1 x2 y2</code></td><td>四个整数，范围 0-1000 的<strong>归一化坐标</strong>（不是真实像素）</td></tr>
+  <tr><td><code>&lt;|ref_start|&gt;</code> / <code>&lt;|ref_end|&gt;</code></td><td>一对标记，围住该块的类型名</td></tr>
+  <tr><td><code>&lt;|rotate_up|&gt;</code></td><td>可选，表示文字竖排（旋转 90°）</td></tr>
+  <tr><td><code>txt_contd_tgt</code></td><td>可选，表示该块是上一块的跨页/跨栏延续</td></tr>
+</table>
+
+<h3>4.2 27 种 Block 类型</h3>
+
+<div class="curl-block">text            — 正文段落         title           — 标题
+table           — 表格             equation        — 行内公式
+display_formula — 独立公式         code            — 代码块
+image           — 图片             chart           — 图表
+header          — 页眉             footer          — 页脚
+page_number     — 页码             table_caption   — 表格标题
+figure_caption  — 图片标题         footnote        — 脚注
+list_item       — 列表项           reference       — 参考文献
+abstract        — 摘要             keywords        — 关键词
+author          — 作者             affiliation     — 机构
+date            — 日期             doi             — DOI
+acknowledgment  — 致谢             appendix        — 附录
+toc             — 目录             algorithm       — 算法
+other           — 其他</div>
+
+<h3>4.3 一条完整的训练样本</h3>
+
+<div class="curl-block">输入（图片）：page_001.png（整页文档截图，已 resize 到 1036×1036）
+
+输出（文本）：
+&lt;|box_start|&gt;120 85 880 145&lt;|box_end|&gt;&lt;|ref_start|&gt;title&lt;|ref_end|&gt;
+&lt;|box_start|&gt;120 160 880 320&lt;|box_end|&gt;&lt;|ref_start|&gt;abstract&lt;|ref_end|&gt;
+&lt;|box_start|&gt;120 340 430 580&lt;|box_end|&gt;&lt;|ref_start|&gt;text&lt;|ref_end|&gt;
+&lt;|box_start|&gt;560 340 880 420&lt;|box_end|&gt;&lt;|ref_start|&gt;table&lt;|ref_end|&gt;
+&lt;|box_start|&gt;560 430 880 465&lt;|box_end|&gt;&lt;|ref_start|&gt;table_caption&lt;|ref_end|&gt;
+&lt;|box_start|&gt;120 600 880 720&lt;|box_end|&gt;&lt;|ref_start|&gt;text&lt;|ref_end|&gt;
+&lt;|box_start|&gt;120 740 880 800&lt;|box_end|&gt;&lt;|ref_start|&gt;footer&lt;|ref_end|&gt;
+&lt;|box_start|&gt;850 780 880 800&lt;|box_end|&gt;&lt;|ref_start|&gt;page_number&lt;|ref_end|&gt;</div>
+
+<p><strong>关键约束</strong>：坐标是 0-1000 归一化值；每行一个 block；block 顺序 = 阅读顺序（上到下、左到右）；每个 <code>&lt;|box_start|&gt;</code> 必须有对应的 <code>&lt;|box_end|&gt;</code>。</p>
+
+<h3>4.4 三种数据构造方法</h3>
+
+<table class="compare-table">
+  <tr><th>方法</th><th>怎么做</th><th>优点</th><th>缺点</th></tr>
+  <tr>
+    <td><strong>A. 纯人工标注</strong></td>
+    <td>LabelStudio / CVAT 画框 → Python 脚本导出为 token 串</td>
+    <td>最准</td>
+    <td>慢，一小时大概标 10-15 页</td>
+  </tr>
+  <tr>
+    <td><strong>B. MinerU 反向生成</strong>（推荐起步）</td>
+    <td>用 MinerU 先解析一遍 → 从 middle.json 提取 block 坐标和类型 → 拼成 token 串 → 人工<strong>只纠错</strong></td>
+    <td>快，人工只看错的</td>
+    <td>依赖 MinerU 已有一定精度</td>
+  </tr>
+  <tr>
+    <td><strong>C. 合成数据</strong>（放量用）</td>
+    <td>LaTeX / HTML 渲染文档 → 编译为 PDF → 截图 → 源码中提取精确坐标作为标签</td>
+    <td>零人工成本、可规模化</td>
+    <td>合成文档和真实扫描件有 gap</td>
+  </tr>
+</table>
+
+<div class="callout tip">
+  <strong>推荐路线</strong>
+  <p>先 B 起步（MinerU 跑 50-100 页目标场景 PDF → middle.json → 脚本转 token 串 → 人工逐条看一眼），覆盖基础版式。遇到 MinerU 完全不对的版式时，用 A 补几十条。想扩量再用 C。</p>
+</div>
+
+<h3>4.5 B 方法的 Python 脚本骨架</h3>
+
+<div class="curl-block">import json
+
+def middle_json_to_layout_label(middle_path, page_w, page_h):
+    """从 MinerU 的 middle.json 反向生成 Layout 训练标签"""
+    with open(middle_path) as f:
+        data = json.load(f)
+
+    lines = []
+    for block in data["pdf_info"][0].get("preproc_blocks", []) + \
+                data["pdf_info"][0].get("para_blocks", []):
+        x1, y1, x2, y2 = block["bbox"]  # 原始像素坐标
+
+        # 归一化到 0-1000
+        x1_n = int(x1 / page_w * 1000)
+        y1_n = int(y1 / page_h * 1000)
+        x2_n = int(x2 / page_w * 1000)
+        y2_n = int(y2 / page_h * 1000)
+
+        btype = block.get("type", "text")
+        line = f"&lt;|box_start|&gt;{x1_n} {y1_n} {x2_n} {y2_n}&lt;|box_end|&gt;&lt;|ref_start|&gt;{btype}&lt;|ref_end|&gt;"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+# 使用
+label = middle_json_to_layout_label("output/demo/middle.json", 595, 842)
+with open("train_data/page_001.txt", "w") as f:
+    f.write(label)</div>
+
+<!-- ============================================================ -->
+<h2>5. Step 2 数据构造：Content Extraction</h2>
+<!-- ============================================================ -->
+
+<h3>5.1 四种 Prompt 模板</h3>
+
+<p>从 <code>mineru_vl_utils</code> 的 <code>DEFAULT_PROMPTS</code> 摘录：</p>
+
+<table class="compare-table">
+  <tr><th>Block 类型</th><th>Prompt</th><th>期望输出</th></tr>
+  <tr><td>text / title / header / footer / list_item / abstract</td><td><code>\nText Recognition:</code></td><td>纯文字或 Markdown</td></tr>
+  <tr><td>table</td><td><code>\nTable Recognition:</code></td><td>OTSL 或 HTML</td></tr>
+  <tr><td>equation / display_formula</td><td><code>\nFormula Recognition:</code></td><td>LaTeX</td></tr>
+  <tr><td>image / chart</td><td><code>\nImage Analysis:</code></td><td>自然语言描述</td></tr>
+</table>
+
+<h3>5.2 训练样本格式</h3>
+
+<div class="curl-block">输入（图片）：从 page_001 中按 bbox 裁出的表格区域 crop_003.png
+输入（Prompt）："\nTable Recognition:"
+
+输出（文本）：
+&lt;table&gt;
+&lt;tr&gt;&lt;th&gt;姓名&lt;/th&gt;&lt;th&gt;年龄&lt;/th&gt;&lt;th&gt;部门&lt;/th&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;张三&lt;/td&gt;&lt;td&gt;28&lt;/td&gt;&lt;td&gt;研发&lt;/td&gt;&lt;/tr&gt;
+&lt;tr&gt;&lt;td&gt;李四&lt;/td&gt;&lt;td&gt;35&lt;/td&gt;&lt;td&gt;市场&lt;/td&gt;&lt;/tr&gt;
+&lt;/table&gt;</div>
+
+<h3>5.3 数据量参考（LoRA 微调）</h3>
+
+<table class="compare-table">
+  <tr><th>数据类型</th><th>最少可跑</th><th>推荐</th><th>备注</th></tr>
+  <tr><td>Step 1（Layout）</td><td>300 页</td><td>1000-2000 页</td><td>覆盖目标场景的版式多样性</td></tr>
+  <tr><td>Step 2 — Text</td><td>500 条</td><td>2000 条</td><td>覆盖各种文字排版（横排/竖排/多栏）</td></tr>
+  <tr><td>Step 2 — Table</td><td>200 条</td><td>500-1000 条</td><td>覆盖有线/无线/合并单元格</td></tr>
+  <tr><td>Step 2 — Formula</td><td>100 条</td><td>300-500 条</td><td>LaTeX 语法准确性是核心质量指标</td></tr>
+  <tr><td>Step 2 — Image</td><td>50 条</td><td>200 条</td><td>图片描述，量可以少一些</td></tr>
+</table>
+
+<div class="highlight-amber">
+  <strong>不要混着训</strong>：Step 1 和 Step 2 的数据格式完全不同，混在一起训练会让模型困惑。正确的做法是分开训练——先微调 Step 1，导出后评估 Layout 效果；满意后再用同一份导出模型微调 Step 2。
+</div>
+
+<!-- ============================================================ -->
+<h2>6. LLaMA-Factory 实操：从零到跑通</h2>
+<!-- ============================================================ -->
+
+<h3>6.1 环境搭建</h3>
+
+<div class="step-card">
+  <h4>克隆 + 创建环境</h4>
+  <div class="curl-block">git clone https://github.com/hiyouga/LLaMA-Factory.git
+cd LLaMA-Factory
+
+conda create -n llama_factory python=3.10 -y
+conda activate llama_factory
+
+pip install -e ".[torch,metrics]"
+# Qwen2-VL 额外依赖
+pip install "transformers>=4.57.0" "accelerate>=1.5.0"
+pip install qwen-vl-utils</div>
+</div>
+
+<h3>6.2 LLaMA-Factory 的数据流</h3>
+
+<div class="mermaid">
+graph TB
+  A["原始数据<br>（图片 + 标注）"] --> B["ShareGPT JSON 格式<br>{messages: [...], images: [...]}"]
+  B --> C["data/dataset_info.json<br>注册数据集"]
+  C --> D["YAML 训练配置<br>examples/train/xxx.yaml"]
+  D --> E["llamafactory-cli train<br>（或 WebUI）"]
+  E --> F["LoRA adapter 权重<br>saves/xxx/adapter_model.safetensors"]
+  F --> G["llamafactory-cli export<br>合并到基础模型"]
+  G --> H["完整微调后模型<br>替换 MinerU 的 ModelPath"]
+
+  style B fill:#dbeafe,stroke:#3b82f6
+  style D fill:#fef3c7,stroke:#f59e0b
+  style E fill:#d1fae5,stroke:#10b981
+  style G fill:#fae8ff,stroke:#86198f
+</div>
+
+<h3>6.3 数据格式转换：ShareGPT 格式</h3>
+
+<p>LLaMA-Factory 的多模态数据采用 ShareGPT 格式——一条 JSON 里有 <code>messages</code> 和 <code>images</code>：</p>
+
+<div class="curl-block">[
+  {
+    "messages": [
+      {
+        "role": "user",
+        "content": "&lt;image&gt;\nText Recognition:"
+      },
+      {
+        "role": "assistant",
+        "content": "进料对口"
+      }
+    ],
+    "images": ["images/crop_001.png"]
+  },
+  {
+    "messages": [
+      {
+        "role": "user",
+        "content": "&lt;image&gt;\nTable Recognition:"
+      },
+      {
+        "role": "assistant",
+        "content": "&lt;table&gt;\n&lt;tr&gt;&lt;th&gt;项目&lt;/th&gt;&lt;th&gt;金额&lt;/th&gt;&lt;/tr&gt;\n&lt;tr&gt;&lt;td&gt;合计&lt;/td&gt;&lt;td&gt;1200&lt;/td&gt;&lt;/tr&gt;\n&lt;/table&gt;"
+      }
+    ],
+    "images": ["images/crop_002.png"]
+  }
+]</div>
+
+<p><strong>对于 Layout Detection（Step 1）的数据</strong>，图片是整页文档，assistant 回复是所有 block 的 token 串：</p>
+
+<div class="curl-block">{
+  "messages": [
+    {
+      "role": "user",
+      "content": "&lt;image&gt;\nLayout Detection:"
+    },
+    {
+      "role": "assistant",
+      "content": "&lt;|box_start|&gt;120 85 880 145&lt;|box_end|&gt;&lt;|ref_start|&gt;title&lt;|ref_end|&gt;\n&lt;|box_start|&gt;120 160 880 320&lt;|box_end|&gt;&lt;|ref_start|&gt;abstract&lt;|ref_end|&gt;\n&lt;|box_start|&gt;120 340 430 580&lt;|box_end|&gt;&lt;|ref_start|&gt;text&lt;|ref_end|&gt;"
+    }
+  ],
+  "images": ["images/page_001.png"]
+}</div>
+
+<div class="callout tip">
+  <strong>&lt;image&gt; 占位符</strong>
+  <p>Qwen2-VL 的对话模板会用 <code>&lt;image&gt;</code> 标记图片插入位置。<strong>images 数组的顺序必须和 &lt;image&gt; 出现的顺序一致</strong>。一条消息里有多张图（如多栏对比），就写多个 <code>&lt;image&gt;</code> 并在 images 数组里按序排好。</p>
+</div>
+
+<h3>6.4 注册数据集</h3>
+
+<p>编辑 <code>LLaMA-Factory/data/dataset_info.json</code>，在末尾追加：</p>
+
+<div class="curl-block">{
+  "mineru_layout_detection": {
+    "file_name": "mineru_layout_train.json",
+    "formatting": "sharegpt",
+    "columns": { "messages": "messages", "images": "images" },
+    "tags": {
+      "role_tag": "role", "content_tag": "content",
+      "user_tag": "user", "assistant_tag": "assistant"
+    }
+  },
+  "mineru_content_extraction": {
+    "file_name": "mineru_content_train.json",
+    "formatting": "sharegpt",
+    "columns": { "messages": "messages", "images": "images" },
+    "tags": {
+      "role_tag": "role", "content_tag": "content",
+      "user_tag": "user", "assistant_tag": "assistant"
+    }
+  }
+}</div>
+
+<p>把 JSON 数据文件放到 <code>data/</code> 目录，图片放到 <code>data/images/</code>（或在 JSON 的 <code>images</code> 字段写相对路径）。</p>
+
+<h3>6.5 YAML 训练配置</h3>
+
+<p>创建 <code>examples/train/mineru_layout_lora.yaml</code>：</p>
+
+<div class="curl-block"># ========== 模型配置 ==========
+model_name_or_path: opendatalab/MinerU2.5-Pro-2605-1.2B
+# 如果模型在本地，写绝对路径：
+# model_name_or_path: /home/user/models/MinerU2.5-Pro-2605-1.2B
+
+# ========== 训练模式 ==========
+stage: sft                       # 监督微调
+finetuning_type: lora            # LoRA，省显存
+lora_target: all                 # 所有线性层（Qwen2-VL 实测 all 比手动指定好）
+lora_rank: 16                    # rank=16 性价比最优
+lora_alpha: 32                   # 缩放因子 = rank × 2
+lora_dropout: 0.05               # 轻微 dropout 防过拟合
+
+# ========== 数据集 ==========
+dataset: mineru_layout_detection  # 对应 dataset_info.json 中的 key
+template: qwen2_vl                # Qwen2-VL 对话模板
+cutoff_len: 4096                  # 最大序列长度
+preprocessing_batch_size: 8
+
+# ========== 图片处理 ==========
+image_resolution: 1036            # 对齐 MinerU 的输入尺寸
+image_max_pixels: 1073296         # 1036²，防止超大图爆显存
+
+# ========== 训练参数 ==========
+output_dir: saves/mineru-layout-lora
+logging_steps: 10
+save_steps: 200
+eval_steps: 200
+save_total_limit: 3
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+gradient_accumulation_steps: 8    # 等效 batch_size = 2×8 = 16
+learning_rate: 5.0e-5             # LoRA 的稳定学习率
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true                        # BF16 省一半显存
+ddp_timeout: 180000000
+
+# ========== 评估 ==========
+eval_dataset: mineru_layout_detection
+do_eval: true
+
+# ========== 可选：WandB 看曲线 ==========
+report_to: wandb
+run_name: mineru-layout-lora-v1</div>
+
+<h3>6.6 启动训练</h3>
+
+<div class="step-card">
+  <h4>单卡训练（最简单）</h4>
+  <div class="curl-block">llamafactory-cli train examples/train/mineru_layout_lora.yaml</div>
+</div>
+
+<div class="step-card">
+  <h4>多卡训练（DeepSpeed ZeRO-2）</h4>
+  <div class="curl-block">deepspeed --num_gpus=4 src/train.py examples/train/mineru_layout_lora.yaml</div>
+</div>
+
+<div class="step-card">
+  <h4>Web UI（零代码，推荐第一次用）</h4>
+  <div class="curl-block">llamafactory-cli webui
+# 浏览器打开 http://localhost:7860
+# Top tab 选 "Train" → 填 model + dataset → 调 lr/epoch → Preview → Start</div>
+</div>
+
+<h3>6.7 导出 + 合并模型</h3>
+
+<div class="curl-block"># 1. 检查 LoRA 权重是否已保存
+ls saves/mineru-layout-lora/
+# adapter_config.json  adapter_model.safetensors  checkpoint-600/ ...
+
+# 2. 合并 LoRA → 完整模型
+llamafactory-cli export \
+  --model_name_or_path opendatalab/MinerU2.5-Pro-2605-1.2B \
+  --adapter_name_or_path saves/mineru-layout-lora/checkpoint-600 \
+  --template qwen2_vl \
+  --finetuning_type lora \
+  --export_dir ./MinerU-Layout-Finetuned \
+  --export_size 2 \
+  --export_legacy_format false
+
+# 3. 验证合并后的模型能否正常加载
+python -c "
+from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+model = Qwen2VLForConditionalGeneration.from_pretrained('./MinerU-Layout-Finetuned')
+processor = AutoProcessor.from_pretrained('./MinerU-Layout-Finetuned')
+print('加载成功，词表大小:', len(processor.tokenizer))
+"</div>
+
+<h3>6.8 接回 MinerU</h3>
+
+<p>方法一：运行时替换路径（测试用）：</p>
+
+<div class="curl-block">from mineru.utils.enum_class import ModelPath
+ModelPath.vlm_root_hf = "./MinerU-Layout-Finetuned"
+# 之后再调 do_parse，MinerU 会自动加载你的微调模型</div>
+
+<p>方法二：符号链接（生产用）：</p>
+
+<div class="curl-block">ln -sf /home/user/MinerU-Layout-Finetuned \
+  ~/.cache/huggingface/hub/models--opendatalab--MinerU2.5-Pro-2605-1.2B-local</div>
+
+<!-- ============================================================ -->
+<h2>7. 关键经验与避坑指南</h2>
+<!-- ============================================================ -->
+
+<h3>7.1 数据质量 > 数据数量</h3>
+
+<p>LoRA 只有约 0.01% 的参数可训练，所以<strong>脏数据的影响会被放大</strong>。500 条精准标注的效果远超 5000 条粗标。</p>
+
+<div class="highlight-green">
+  <strong>数据质量检查清单（每条都过一遍）</strong><br>
+  □ 每个 <code>&lt;|box_start|&gt;</code> 都有对应的 <code>&lt;|box_end|&gt;</code><br>
+  □ 坐标值在 0-1000 范围内<br>
+  □ block 类型名拼写正确（27 种之一，大小写敏感）<br>
+  □ Step 2 数据中，Prompt 与该 block 的实际类型一致<br>
+  □ 表格输出是合法的 OTSL 或 HTML<br>
+  □ 公式输出是合法的 LaTeX<br>
+  □ 图片没有损坏、尺寸不为零
+</div>
+
+<h3>7.2 训练策略建议</h3>
+
+<table class="compare-table">
+  <tr><th>场景</th><th>策略</th><th>数据量</th><th>预期效果</th></tr>
+  <tr>
+    <td>增加对新版式的识别</td>
+    <td>只微调 Step 1 (Layout)</td>
+    <td>500-1000 页新格式</td>
+    <td>新版式 recall +30-50%</td>
+  </tr>
+  <tr>
+    <td>提升特定类型文字识别</td>
+    <td>只微调 Step 2 (Content)</td>
+    <td>1000-2000 条</td>
+    <td>目标类型 CER -20%</td>
+  </tr>
+  <tr>
+    <td>适配新语言</td>
+    <td>两步都微调</td>
+    <td>各 1000+ 条</td>
+    <td>中文模型适配日/韩/阿拉伯语等</td>
+  </tr>
+  <tr>
+    <td>整体精度提升</td>
+    <td>先 Step1 后 Step2 串联微调</td>
+    <td>各 2000+ 条</td>
+    <td>端到端 WER -15-25%</td>
+  </tr>
+</table>
+
+<h3>7.3 常见问题速查</h3>
+
+<table class="compare-table">
+  <tr><th>现象</th><th>根因</th><th>解法</th></tr>
+  <tr><td>训练 loss 不下降</td><td>学习率太小，或数据格式错误</td><td>先验证一条数据能在原始模型上正常推理（排除格式问题）；调大 lr 到 1e-4</td></tr>
+  <tr><td>显存爆了 (OOM)</td><td>batch_size 或 cutoff_len 太大</td><td>per_device_batch_size 降到 1；gradient_accumulation 加大；cutoff_len 降到 2048</td></tr>
+  <tr><td>微调后原有能力退化</td><td>灾难性遗忘（数据太单一）</td><td>混入 10-20% 原始领域的多样性数据</td></tr>
+  <tr><td>推理结果格式乱掉</td><td>特殊 token 没被正确保留</td><td>确认 tokenizer 的 special_tokens 配置与原模型一致</td></tr>
+  <tr><td>LoRA 加载后推理慢</td><td>LoRA 未合并时每次 forward 多算一次 A·B</td><td>务必先 export 合并再部署</td></tr>
+  <tr><td><code>nvidia-smi</code> 显示占用 0%</td><td>模型还没真正跑（惰性加载）</td><td>正常，做一次 forward 再看</td></tr>
+</table>
+
+<h3>7.4 显存预算（参考值）</h3>
+
+<table class="compare-table">
+  <tr><th>配置</th><th>24GB (RTX 4090)</th><th>48GB (A6000)</th><th>80GB (A100)</th></tr>
+  <tr><td>LoRA r=16, batch=1, cutoff=4096</td><td class="highlight-green">可跑</td><td class="highlight-green">轻松</td><td class="highlight-green">轻松</td></tr>
+  <tr><td>LoRA r=16, batch=4, cutoff=4096</td><td class="highlight-red">OOM</td><td class="highlight-green">可跑</td><td class="highlight-green">轻松</td></tr>
+  <tr><td>全参微调, batch=1</td><td class="highlight-red">完全不行</td><td class="highlight-amber">勉强（需 gradient ckpt + 小 cutoff）</td><td class="highlight-green">可跑 batch=2-4</td></tr>
+  <tr><td>全参 + DeepSpeed ZeRO-3</td><td>—</td><td>—</td><td class="highlight-green">多卡可跑</td></tr>
+</table>
+
+<h3>7.5 训练之前先验证数据</h3>
+
+<p>最常翻车的不是训练配置，而是<strong>数据格式不对</strong>。建议训练前先跑一次数据检查：</p>
+
+<div class="curl-block"># 在 LLaMA-Factory 中预览数据
+llamafactory-cli chat \
+  --model_name_or_path opendatalab/MinerU2.5-Pro-2605-1.2B \
+  --template qwen2_vl \
+  --dataset mineru_layout_detection
+# 交互式看看模型能不能正常读取你的数据、能不能正常生成
+# 如果这里就报错了，训练一定也报错</div>
+
+<!-- ============================================================ -->
+<h2>8. 从零到跑通的最小路径（总结）</h2>
+<!-- ============================================================ -->
+
+<div class="mermaid">
+graph TB
+  A["第 1 步<br>MinerU 解析 50 张目标 PDF<br>→ middle.json + 裁图"] --> B["第 2 步<br>脚本转 ShareGPT 格式<br>人工逐条扫一遍纠错"]
+  B --> C["第 3 步<br>装 LLaMA-Factory<br>注册数据集 + YAML"]
+  C --> D["第 4 步<br>RTX 4090 单卡<br>r=8 epoch=1 验证管线"]
+  D --> E["第 5 步<br>数据加到 500-1000 条<br>r=16 epoch=3 正式训练"]
+  E --> F["第 6 步<br>导出合并 → A/B 对比<br>原始模型 vs 微调模型"]
+
+  style A fill:#dbeafe,stroke:#3b82f6
+  style C fill:#fef3c7,stroke:#f59e0b
+  style D fill:#d1fae5,stroke:#10b981
+  style F fill:#fae8ff,stroke:#86198f
+</div>
+
+<table class="compare-table">
+  <tr><th>阶段</th><th>预计时间</th><th>产出</th></tr>
+  <tr><td>数据准备</td><td>2-3 天</td><td>500-1000 条训练数据 + 100-200 条验证数据</td></tr>
+  <tr><td>训练调试</td><td>1 天</td><td>跑通管线，确认 loss 正常下降</td></tr>
+  <tr><td>评估</td><td>0.5 天</td><td>A/B 对比报告，确认有没有退化</td></tr>
+  <tr><td><strong>合计</strong></td><td><strong>约一周</strong></td><td><strong>从零到有可用的微调模型</strong></td></tr>
+</table>
+
+<!-- ============================================================ -->
+<h2>9. 本课涉及的文件清单</h2>
+<!-- ============================================================ -->
+
+<div class="dir-tree">（外部）LLaMA-Factory/
+  data/dataset_info.json              ← 注册 mineru_layout_detection + mineru_content_extraction
+  data/mineru_layout_train.json       ← Step 1 训练数据（ShareGPT 格式）
+  data/mineru_content_train.json      ← Step 2 训练数据（ShareGPT 格式）
+  data/images/                        ← 训练图片目录
+  examples/train/mineru_layout_lora.yaml  ← YAML 训练配置
+  saves/mineru-layout-lora/           ← 训练输出（adapter_model.safetensors）
+
+  mineru/utils/enum_class.py          ← ModelPath.vlm_root_hf（接回微调模型的入口）
+  mineru/backend/vlm/vlm_analyze.py   ← Qwen2VLForConditionalGeneration 加载点
+
+  （产出）MinerU-Layout-Finetuned/     ← LoRA 导出合并后的完整微调模型</div>
+
+<!-- ============================================================ -->
+<h2>10. 小结</h2>
+<!-- ============================================================ -->
+
+<div class="callout success">
+  <strong>五个核心收获</strong>
+  <p>1. <strong>权重 = 浮点数矩阵</strong>，12 亿个 BF16 参数 ≈ 2.4 GB 的 safetensors 文件。模型文件包含权重 + config.json + tokenizer + processor，缺一不可。<br>
+  2. <strong>微调 = 用你的数据继续更新权重</strong>。全参微调改全部 12 亿个参数，LoRA 只训练挂在原矩阵上的两个小矩阵（约 13 万个参数），省显存 90%+。<br>
+  3. <strong>数据必须分两步覆盖</strong>：Step 1 Layout Detection（整页图 → 特殊 token 串）和 Step 2 Content Extraction（裁块图 + 类型 prompt → 文字/表格/公式）。数据质量比数量重要得多。<br>
+  4. <strong>LLaMA-Factory 是最快上手路线</strong>：数据转 ShareGPT JSON → dataset_info.json 注册 → YAML 配好 → llamafactory-cli train 或 WebUI 启动。<br>
+  5. <strong>训练完要 export 合并</strong>再部署——不合并的 LoRA 每次 forward 多算一次矩阵乘法，推理慢且可能因为 adapter 加载问题报错。</p>
+</div>
+
+<h2>11. 推荐资源</h2>
+
+<ul>
+  <li><a href="https://github.com/hiyouga/LLaMA-Factory">LLaMA-Factory 官方仓库</a> — 文档、示例 YAML、FAQ</li>
+  <li><a href="https://github.com/QwenLM/Qwen2-VL">QwenLM/Qwen2-VL</a> — 骨架模型官方仓库，含微调脚本参考</li>
+  <li><a href="https://huggingface.co/docs/peft/index">HuggingFace PEFT 文档</a> — LoRA / QLoRA / AdaLoRA 原理和 API</li>
+  <li><a href="https://huggingface.co/docs/safetensors/index">safetensors 官方文档</a> — 为什么用 safetensors 而不是 Pickle</li>
+  <li>本课前置知识：<a href="0011-vlm-finetuning-and-wsl2-vllm.html">第 11 课：VLM 微调可行性 + WSL2/vLLM 跃迁</a></li>
+</ul>
+
+<div class="callout tip">
+  <strong>下一步可以问老师</strong>
+  <p>训练完的模型怎么在 1000 份文档上做批量 A/B 评估？<br>
+  LoRA 训练好的 adapter 能不能和别的 LoRA 叠加？（LoRA 算术）<br>
+  训练数据太少怎么用数据增强（旋转/缩放/噪声/颜色抖动）？<br>
+  如果想上全参微调，需要哪些额外的工程准备？<br>
+  把这些甩给老师，下一课就长在你最关心的那个口子上。</p>
+</div>
+
+<div class="lesson-nav">
+  <a href="0011-vlm-finetuning-and-wsl2-vllm.html">← 第 11 课：VLM 微调 + WSL2/vLLM 跃迁</a>
+  <a href="index.html">↑ 课程总目录</a>
+  <a href="0013-modelscope-swift-finetuning.html">第 13 课：魔搭 SWIFT 微调实战 →</a>
+</div>
+
+</body>
+</html>

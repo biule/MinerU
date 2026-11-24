@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 16：微调验收与量化 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0015-small-image-ocr-extension.html">← 课程 15</a>
+  <a href="0017-deployment-and-operations.html">课程 17 →</a>
+  <a href="0010-finetune-overview.html">课程 10</a>
+  <a href="../index.html">课程目录</a>
+  <a href="../reference/glossary.html">术语表</a>
+</nav>
+
+<p class="eyebrow">Lesson 16 · 微调系列 4/4</p>
+<h1>微调验收：A/B 评测与量化部署</h1>
+<p class="lede">这节课只做一件事：用同一套文档、同一套协议、同一套指标，证明“微调后的模型确实更好，且没有把通用能力搞坏”；然后用同样的方法验收量化模型，决定是否上线。</p>
+
+<div class="callout">
+  <strong>为什么补这一课：</strong>课程 10–12 解决了“怎么训、怎么接”，但没有解决“怎么证明”。没有评测门的微调，只是换了一个权重；没有回归集的量化，只是把风险藏起来。
+</div>
+
+<h2 id="outcome">你将能够</h2>
+<ul>
+  <li>设计一个可复现的 A/B 评测：固定输入、档位、配置、引擎与采样。</li>
+  <li>按块类型计算文本、表格、公式与结构指标，并解释各自局限。</li>
+  <li>用配对比较与置信区间判断“提升是不是噪声”。</li>
+  <li>用同一套 harness 验收 GGUF / AWQ / GPTQ 等量化模型。</li>
+  <li>写出可执行的验收门槛与回滚条件。</li>
+</ul>
+
+<h2 id="questions">1. 评测回答三个问题</h2>
+<div class="flow-h">
+  <div class="node accent"><strong>变好了吗</strong>目标集：领域表格/公式/字符是否提升</div>
+  <div class="arrow-h"></div>
+  <div class="node"><strong>变差了吗</strong>回归集：通用文档是否退化</div>
+  <div class="arrow-h"></div>
+  <div class="node"><strong>代价多少</strong>延迟、显存、吞吐、部署复杂度</div>
+</div>
+
+<table>
+  <thead><tr><th>集合</th><th>内容</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td>目标集（target）</td><td>你的领域文档，含微调覆盖的版式/符号</td><td>证明改进</td></tr>
+    <tr><td>回归集（general）</td><td>论文、报告、扫描件等通用样本</td><td>防止灾难性遗忘</td></tr>
+    <tr><td>边界集（edge）</td><td>空页、旋转、极小图、密排表格</td><td>发现新的失败模式</td></tr>
+  </tbody>
+</table>
+<p class="small">划分按<strong>文档</strong>，不是按块/页；同一文档的块跨集合会泄漏，指标虚高。</p>
+
+<h2 id="protocol">2. 固定协议：只允许一个变量</h2>
+<table>
+  <thead><tr><th>必须固定</th><th>做法</th><th>原因</th></tr></thead>
+  <tbody>
+    <tr><td>输入与页范围</td><td>同一批文件、同一 <code>page_range</code></td><td>输入变化会污染比较</td></tr>
+    <tr><td>tier / parse_mode</td><td>都用 <code>standard</code> + <code>auto</code>（或都 ocr）</td><td>不同档位调用不同模型</td></tr>
+    <tr><td>VLM 采样参数</td><td>同一引擎、同一默认采样</td><td>解码随机性会影响输出</td></tr>
+    <tr><td>硬件与引擎版本</td><td>同一机器/驱动/引擎</td><td>速度与数值差异</td></tr>
+    <tr><td>评测代码版本</td><td>指标实现与归一化固定</td><td>否则“提升”可能来自指标改动</td></tr>
+  </tbody>
+</table>
+<pre><code># 一次只改一个变量：base 服务 vs finetuned 服务
+from mineru.config import VlmConfig
+from mineru.parser import parse
+
+BASE = VlmConfig(server_url="http://127.0.0.1:30000/v1", model="mineru-base")
+CAND = VlmConfig(server_url="http://127.0.0.1:30001/v1", model="mineru-ft")
+
+result = parse("sample.pdf", tier="standard", vlm_config=CAND)</code></pre>
+<div class="callout">
+  <strong>进程建议：</strong>同一进程同时持有两个 VLM 运行时可能挤爆显存。评测脚本最好<strong>每个变体一个进程</strong>，输出 JSON 后再离线比较。
+</div>
+
+<h2 id="metrics">3. 指标：按块类型分开算</h2>
+<table>
+  <thead><tr><th>对象</th><th>主指标</th><th>辅助</th><th>注意</th></tr></thead>
+  <tbody>
+    <tr><td>普通文本</td><td>CER（字符错误率）</td><td>精确匹配、词级 WER</td><td>先做 NFKC、空白折叠；保留归一化版本号</td></tr>
+    <tr><td>表格</td><td>单元格 F1 / 结构精确匹配</td><td>TEDS（外部实现）</td><td>HTML 属性顺序不应影响结果</td></tr>
+    <tr><td>公式</td><td>归一化 LaTeX 精确匹配</td><td>编辑距离</td><td>空格、定界符、等价写法要先统一</td></tr>
+    <tr><td>结构</td><td>块类型 F1</td><td>阅读顺序距离、页覆盖率</td><td>避免只比数量</td></tr>
+    <tr><td>业务字段</td><td>字段 F1</td><td>关键字段召回率</td><td>最终交付指标，优先看它</td></tr>
+    <tr><td>成本</td><td>p50 / p95 延迟</td><td>显存峰值、页/秒</td><td>质量提升必须能承受代价</td></tr>
+  </tbody>
+</table>
+
+<pre><code># tools/eval_ab.py —— 指标骨架（可运行的核心部分）
+from __future__ import annotations
+
+import json
+import re
+import unicodedata
+from pathlib import Path
+
+from mineru.config import VlmConfig
+from mineru.parser import parse
+from mineru.render import RenderFormat, render
+
+WS = re.compile(r"\s+")
+
+
+def norm(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text or "")
+    return WS.sub(" ", text).strip()
+
+
+def levenshtein(a: str, b: str) -> int:
+    if len(a) &lt; len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def cer(ref: str, hyp: str) -> float:
+    ref, hyp = norm(ref), norm(hyp)
+    return levenshtein(ref, hyp) / max(1, len(ref))
+
+
+def by_type(items: list[dict]) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {}
+    for item in items:
+        out.setdefault(item["type"], []).append(item)
+    return out
+
+
+def evaluate(pdf: Path, cfg: VlmConfig | None, ref_payload: dict) -> dict:
+    result = parse(pdf, tier="standard", vlm_config=cfg)
+    items = render(result.middle_json, RenderFormat.CONTENT_LIST)
+    grouped = by_type(items)
+
+    hyp_text = norm("\n".join(i.get("text", "") for i in grouped.get("text", [])))
+    ref_text = norm(ref_payload["text"])
+    hyp_eq = [norm(i.get("text", "")) for i in grouped.get("equation", [])]
+    ref_eq = [norm(x) for x in ref_payload["equations"]]
+    eq_hit = sum(1 for x in ref_eq if x in hyp_eq) / max(1, len(ref_eq))
+
+    return {
+        "pdf": pdf.name,
+        "text_cer": cer(ref_text, hyp_text),
+        "equation_exact": eq_hit,
+        "table_count": len(grouped.get("table", [])),
+        "block_count": len(items),
+    }
+
+
+if __name__ == "__main__":
+    # 每个变体独立运行：python tools/eval_ab.py --config base.json
+    cfg = VlmConfig(server_url="http://127.0.0.1:30001/v1", model="mineru-ft")
+    refs = json.loads(Path("eval/refs.json").read_text(encoding="utf-8"))
+    rows = [evaluate(Path(p), cfg, ref) for p, ref in refs.items()]
+    Path("eval/candidate.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps(rows, ensure_ascii=False, indent=2))</code></pre>
+
+<h2 id="stats">4. 判断提升是不是噪声</h2>
+<pre><code># 配对 bootstrap：同一文档上的差异，重采样文档
+import random
+
+def paired_delta(base: list[float], cand: list[float], rounds: int = 2000) -> tuple[float, float, float]:
+    diffs = [b - c for b, c in zip(base, cand)]     # 正数表示 CER 下降（变好）
+    mean = sum(diffs) / len(diffs)
+    samples = []
+    for _ in range(rounds):
+        pick = [random.choice(diffs) for _ in diffs]
+        samples.append(sum(pick) / len(pick))
+    samples.sort()
+    lo, hi = samples[int(0.025 * rounds)], samples[int(0.975 * rounds)]
+    return mean, lo, hi</code></pre>
+<ul>
+  <li>报告“均值 + 95% 区间”，不要只报一个更好的数字。</li>
+  <li>样本量：目标集至少几十份文档起步；几份文档的“提升”没有决策价值。</li>
+  <li>同时看<strong>按类型</strong>的分项：总体 CER 下降，可能掩盖表格变差、公式不变。</li>
+</ul>
+
+<h2 id="quant">5. 量化验收：用同一把尺子</h2>
+<table>
+  <thead><tr><th>路径</th><th>形态</th><th>验收重点</th></tr></thead>
+  <tbody>
+    <tr><td>llama.cpp GGUF</td><td>官方 <code>Q8_0</code>；可再转 <code>Q4_K_M</code> 等</td><td>主模型与 <code>mmproj</code> 配对；CPU/GPU offload 后的速度与质量</td></tr>
+    <tr><td>vLLM AWQ / GPTQ</td><td>量化权重或量化配置</td><td>上游服务正常；同一 harness 下表格/公式是否退化</td></tr>
+    <tr><td>远程服务</td><td>OpenAI 兼容端点</td><td>MinerU 不感知量化；只认质量与延迟</td></tr>
+  </tbody>
+</table>
+<pre><code># llama.cpp：官方 Q8_0 是起点；更低比特用 llama.cpp 工具链转换与量化
+# 1) 微调权重 → f16 GGUF
+python llama.cpp/convert_hf_to_gguf.py /path/to/finetuned --outfile ft-f16.gguf
+# 2) 量化
+llama-quantize ft-f16.gguf ft-q4_k_m.gguf Q4_K_M
+# 3) 放入本地模型目录，按 ModelRepo 的 main/mmproj 约定替换
+mineru-kit models verify --tier standard
+
+# vLLM：量化权重的加载方式由模型目录内的量化配置或服务参数决定
+vllm serve /path/to/awq-model --served-model-name mineru-ft-awq --port 30001</code></pre>
+<ul>
+  <li><strong>不要只看平均 CER</strong>：量化对长公式、密排表格、稀有字符更敏感，分项必须看。</li>
+  <li><strong>mmproj 不能乱配</strong>：视觉投影与语言塔必须来自兼容训练；不匹配会乱码或静默错误。</li>
+  <li><strong>速度收益要落在真实链路</strong>：服务端 tokens/s 不等于端到端页/秒；用同一批 PDF 计 p50/p95。</li>
+  <li><strong>先定权重，再量化</strong>：常规流程量化后只做验收；若还要继续训练，应重新做量化感知训练（QAT），而不是直接在量化权重上微调。</li>
+</ul>
+
+<h2 id="gate">6. 验收门槛与回滚</h2>
+<table>
+  <thead><tr><th>门槛</th><th>建议</th><th>不通过时</th></tr></thead>
+  <tbody>
+    <tr><td>目标集</td><td>主指标提升，且配对区间下界 &gt; 0</td><td>继续调数据/训练，不上线</td></tr>
+    <tr><td>回归集</td><td>无显著退化；关键类型不下降</td><td>扩数据、降学习率、回滚基线</td></tr>
+    <tr><td>边界集</td><td>不出现新的崩溃/空输出模式</td><td>修复后重跑</td></tr>
+    <tr><td>成本</td><td>p95 延迟与显存在预算内</td><td>换量化/引擎/规格</td></tr>
+    <tr><td>可回滚</td><td>配置切换即可回到基线模型</td><td>保留 base 服务与配置</td></tr>
+  </tbody>
+</table>
+<pre><code># 上线顺序：影子 → 小流量 → 全量
+# 1) 影子：候选服务接 5% 文档，只记录不采用
+# 2) 小流量：采用结果，人工抽检关键字段
+# 3) 全量：回归集每日巡检；异常时切回 base 的 server_url/model</code></pre>
+
+<h2 id="quiz">7. 检索练习</h2>
+
+<div class="quiz" data-explanation="A/B 必须只改模型这一个变量；tier、页范围、采样、引擎、硬件都应固定。">
+  <h3>Q1. A/B 评测中应该改变几个变量？</h3>
+  <button class="quiz-option">越多越好</button>
+  <button class="quiz-option">两个起</button>
+  <button class="quiz-option" data-correct="true">一个</button>
+  <button class="quiz-option">零个最好</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="验证集/评测集必须按文档划分；同文档的块跨集合会造成泄漏并虚高指标。">
+  <h3>Q2. 评测集划分的正确粒度是？</h3>
+  <button class="quiz-option">按块</button>
+  <button class="quiz-option">按页</button>
+  <button class="quiz-option" data-correct="true">按文档</button>
+  <button class="quiz-option">按类型</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="MinerU 通过 OpenAI 兼容接口消费 VLM，量化方式对它是透明的；验收看端到端质量与延迟。">
+  <h3>Q3. MinerU 需要为 AWQ 模型改代码吗？</h3>
+  <button class="quiz-option">需要改引擎</button>
+  <button class="quiz-option">需要改协议</button>
+  <button class="quiz-option" data-correct="true">不需要改</button>
+  <button class="quiz-option">需要改档位</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="量化对长公式、密排表格和稀有字符更敏感，必须看分项指标而不是只看平均 CER。">
+  <h3>Q4. 量化验收最应关注？</h3>
+  <button class="quiz-option">平均速度</button>
+  <button class="quiz-option">文件大小</button>
+  <button class="quiz-option" data-correct="true">分项质量</button>
+  <button class="quiz-option">启动时间</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">8. 动手挑战</h2>
+<ol>
+  <li>选 20 份文档，建立目标集/回归集/边界集，写出参考文本、公式与表格（人工或强模型校对）。</li>
+  <li>用同一 base 模型跑两遍评测，确认指标稳定；如果波动大，先固定采样或增加样本。</li>
+  <li>接入课程 12 的微调模型，跑同一套 harness，输出 CER、公式精确匹配、表格数与 p95 延迟。</li>
+  <li>把官方 GGUF Q8_0 与一个更低比特量化版本对比；如果表格/公式下降超过阈值，记录并回滚。</li>
+  <li>写一份一页纸的验收报告：结论、区间、分项、成本、回滚方案。</li>
+</ol>
+
+<h2 id="review">9. 本课小结</h2>
+<table>
+  <thead><tr><th>掌握点</th><th>证据</th></tr></thead>
+  <tbody>
+    <tr><td>可复现 A/B</td><td>能列出所有必须固定的变量</td></tr>
+    <tr><td>分项指标</td><td>能解释 CER / 表格 / 公式 / 结构各自局限</td></tr>
+    <tr><td>统计判断</td><td>能报告配对均值与 95% 区间</td></tr>
+    <tr><td>量化验收</td><td>用同一 harness 对比 Q8/Q4 或 AWQ，做出上线/回滚决定</td></tr>
+  </tbody>
+</table>
+
+<h2 id="source">10. 主源</h2>
+<ul>
+  <li><strong>仓库内：</strong><a href="../../../next/sdk/parser.md">SDK parser</a>、<a href="../../../next/sdk/parse-result.md">ParseResult</a>、<a href="../../../next/model-assets.md">模型资产</a>（GGUF / mmproj 约定）。</li>
+  <li><strong>外部基准：</strong><a href="https://github.com/opendatalab/OmniDocBench">OmniDocBench</a> — 文档解析评测基准；适合做通用回归，不替代你的业务目标集。</li>
+  <li><strong>serving：</strong><a href="https://docs.vllm.ai/en/stable/serving/openai_compatible_server/">vLLM OpenAI-compatible server</a>；llama.cpp 的 <code>convert_hf_to_gguf.py</code> / <code>llama-quantize</code>。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0017-deployment-and-operations.html">课程 17 · 部署与运维</a>——把通过验收的模型放进可观测、可回滚的服务拓扑。把你的验收报告贴给教师（agent），这是微调系列最重要的学习证据。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 16 · 参考：<a href="../reference/tier-matrix.html">档位矩阵</a> · <a href="../reference/glossary.html">术语表</a> · <a href="../reference/commands.html">命令速查</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

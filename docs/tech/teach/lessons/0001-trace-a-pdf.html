@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 01：追踪一个 PDF — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="../MISSION.md">使命</a>
+  <a href="../reference/architecture-map.html">架构地图</a>
+  <a href="../reference/tier-matrix.html">档位矩阵</a>
+  <a href="../reference/glossary.html">术语表</a>
+  <a href="../reference/commands.html">命令速查</a>
+  <a href="0002-choose-the-right-tier.html">课程 02 →</a>
+</nav>
+
+<p class="eyebrow">Lesson 01 · 主线</p>
+<h1>追踪一个 PDF：从输入到 MiddleJson</h1>
+<p class="lede">这节课只做一件事：能在不查资料的情况下，说出一个 PDF 从命令行进入 MinerU 后，经过哪些模块、在哪些点做出决策、最终变成什么对象。这是后续所有改动的地基。</p>
+
+<h2 id="outcome">你将能够</h2>
+<ul>
+  <li>画出 `parse()` → `doc_analyze()` → `analyze_pdf()` → `MiddleJson` 的调用链。</li>
+  <li>说出 PDF 在 <code>flash</code>/<code>basic</code>/<code>standard</code>/<code>advanced</code> 下的不同执行路径。</li>
+  <li>定位“输入准备 / 路由 / 窗口编排 / 后处理”四个改动落点。</li>
+</ul>
+
+<div class="callout">
+  <strong>为什么先学这个：</strong>你要扩展这个 fork。任何功能改动都要落在某条链路的某一环；说不清链路，就只能靠猜。
+</div>
+
+<h2 id="map">1. 一张图</h2>
+
+<div class="flow">
+  <div class="node dark"><strong>输入</strong>path + tier + ocr_mode + page_range</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>MinerUParser._prepare_input()</strong>类型识别 · 图片转 PDF · 页范围重写</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>doc_analyze()</strong>按 file_suffix 路由</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>analyze_pdf()</strong>分类 → 选择模型 → 窗口流水线</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>ModelJson</strong>内部原始结果</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>model_json_to_middle_json()</strong>确定性后处理 + 可选 LLM</div>
+  <div class="arrow-v"></div>
+  <div class="node dark"><strong>ParseResult(MiddleJson)</strong>渲染 / 保存 / 读取</div>
+</div>
+
+<h2 id="decisions">2. 五个决策点</h2>
+
+<h3 id="d1">决策点 1：输入被当成什么？</h3>
+<p>图片不会单独走一条流水线，而是先转成 PDF；页范围只有 PDF 支持。源码 <code>mineru/parser/mineru_parser.py</code>：</p>
+<pre><code># 1) 页范围语法先归一（1-5 / r1 / all）
+page_range = normalize_page_range_input(page_range)
+
+file_bytes = path.read_bytes()
+suffix = guess_suffix_by_path(path)
+source_suffix = suffix
+
+# 2) 图片统一转 PDF，后续走同一条 PDF 流水线
+if suffix in IMAGE_EXTENSIONS:
+    from docvortex.document.pdf import PDFDocument
+    file_bytes = PDFDocument.from_image(file_bytes).bytes
+    suffix = "pdf"
+
+# 3) 页范围只允许 PDF；其他格式整本解析
+if source_suffix not in PAGE_RANGE_PARSE_EXTENSIONS and page_range.strip():
+    raise InvalidRequestError("page_range_invalid", ...)
+
+# 4) PDF 只保留请求页；坏页会被记录，稍后补空占位
+file_bytes, retained, broken = self._maybe_adjust_pdf_bytes(file_bytes, suffix, page_range)</code></pre>
+
+<h3 id="d2">决策点 2：交给哪个分析器？</h3>
+<p><code>doc_analyze()</code> 是统一门面。它先校验参数，再按后缀显式路由：</p>
+<pre><code>if file_suffix == "pdf":
+    result = analyze_pdf(...)          # PDF：窗口流水线
+elif file_suffix in ("csv", "tsv"):
+    result = analyze_csv(...)          # 原生 Flash
+elif file_suffix == "epub":
+    result = analyze_epub(...)
+elif file_suffix == "html":
+    result = analyze_html(...)
+elif file_suffix == "mhtml":
+    result = analyze_mhtml(...)
+elif file_suffix == "ofd":
+    result = analyze_ofd(...)
+else:
+    result = analyze_office(...)       # Office / ODF / RTF</code></pre>
+
+<h3 id="d3">决策点 3：PDF 用哪条执行路径？</h3>
+<p>这是最重要的分叉，发生在 <code>_prepare_analysis()</code>：</p>
+<pre><code>state.document = PDFDocument(file_bytes)
+
+# auto：由 DocVortex 分类文本层；否则使用显式 txt/ocr
+if parse_mode == "auto":
+    parse_mode = state.document.classify()
+
+# flash + txt：完全不加载小模型，直接走原生 PDF 模型
+state.flash_txt_mode = effort == "flash" and state.parse_mode == "txt"
+
+if not state.flash_txt_mode:
+    # 其他情况：加载/复用 Hybrid 小模型
+    state.hybrid_model = HybridLocalModelContextSingleton().get_model()
+    acquire_document(state.hybrid_model.device)
+
+    # high/xhigh：额外创建 VLM 预测器
+    if effort in {"high", "xhigh"}:
+        state.predictor, _backend = get_vlm_predictor(vlm_config)</code></pre>
+
+<h3 id="d4">决策点 4：窗口里做什么？</h3>
+<p>PDF 按窗口（默认 64 页）处理。每个窗口固定三段：准备 → 推理 → 收尾。</p>
+<div class="flow-h">
+  <div class="node"><strong>准备</strong>渲染页面<br>小模型 layout<br>表格方向/原生表格</div>
+  <div class="arrow-h"></div>
+  <div class="node accent"><strong>推理</strong>flash：OCR<br>medium：MFR/表格/OCR<br>high/xhigh：VLM</div>
+  <div class="arrow-h"></div>
+  <div class="node"><strong>收尾</strong>正文回填<br>公式编号合并<br>视觉块裁图</div>
+</div>
+<pre><code># 准备与收尾持有本地模型锁；VLM 推理期间释放锁（window.py）
+with local_model_stage(hybrid_model.device):
+    state = _prepare_pdf_window(...)
+
+if effort in {"high", "xhigh"}:
+    result = (vlm_predictor.batch_extract_with_layout(**options)
+              if effort == "high" else
+              vlm_predictor.batch_two_step_extract(**options))
+
+with local_model_stage(hybrid_model.device):
+    return _finish_pdf_window(state, result, ...)</code></pre>
+
+<h3 id="d5">决策点 5：结果如何变成公开协议？</h3>
+<pre><code># 1) 分析结果先包装为 ModelJson（内部对象）
+model_json = _build_model_json(result, file_suffix, page_index_map, source_properties)
+
+# 2) DocVortex 做确定性后处理；MinerU 只在 PDF 上追加可选 LLM 增强
+middle_json = model_json_to_middle_json(model_json, llm_aided_config=get_config().llm_aided)
+
+# 3) 返回 ParseResult；渲染与保存都从 MiddleJson 出发
+return ParseResult(middle_json=middle_json)</code></pre>
+
+<div class="callout">
+  <strong>记住这条边界：</strong><code>ModelJson</code> 只服务内部；公开协议是 <code>MiddleJson</code>；<code>ParseResult</code> 只持有 <code>MiddleJson</code>，不持有 PDF 对象。
+</div>
+
+<h2 id="quiz">3. 检索练习</h2>
+
+<div class="quiz" data-explanation="图片在输入准备阶段先由 PDFDocument.from_image 转成 PDF，之后与普通 PDF 走同一条流水线。">
+  <h3>Q1. 图片输入在 <code>_prepare_input</code> 中会先被转换成什么？</h3>
+  <button class="quiz-option" data-correct="true">PDF</button>
+  <button class="quiz-option">OCR</button>
+  <button class="quiz-option">VLM</button>
+  <button class="quiz-option">CSV</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="只有 flash + txt 会走 DocVortex 的原生 PDF 模型，不加载小模型；其他组合都需要 Hybrid 小模型。">
+  <h3>Q2. 哪种情况会走 DocVortex 的原生 PDF 模型（不加载小模型）？</h3>
+  <button class="quiz-option" data-correct="true">flash + txt</button>
+  <button class="quiz-option">basic</button>
+  <button class="quiz-option">standard</button>
+  <button class="quiz-option">advanced</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="ModelJson 是内部分析结果，不进入公开结果包；公开协议是 MiddleJson。">
+  <h3>Q3. ModelJson 会进入公开结果包吗？</h3>
+  <button class="quiz-option">进入</button>
+  <button class="quiz-option" data-correct="true">不进</button>
+  <button class="quiz-option">有时</button>
+  <button class="quiz-option">可选</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="mineru read 只消费已有缓存，不会触发新的质量解析；没有缓存时返回错误。">
+  <h3>Q4. <code>mineru read</code> 会触发新的解析吗？</h3>
+  <button class="quiz-option">会触发</button>
+  <button class="quiz-option" data-correct="true">不触发</button>
+  <button class="quiz-option">仅缓存</button>
+  <button class="quiz-option">仅远端</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">4. 源码练习</h2>
+<p>打开仓库，完成这三个检索任务。每个任务都能在 2 分钟内完成；做完再回来核对。</p>
+<ol>
+  <li>在 <code>mineru/parser/mineru_parser.py</code> 找到图片转 PDF 的那一行，并说出为什么后缀要改成 <code>pdf</code>。</li>
+  <li>在 <code>mineru/backend/analyze.py</code> 数一数 <code>doc_analyze()</code> 有几条 <code>elif</code> 路由，分别对应哪些后缀。</li>
+  <li>在 <code>mineru/backend/analysis/pdf/pipeline.py</code> 找到 <code>flash_txt_mode</code> 的赋值，并解释它为什么能跳过小模型加载。</li>
+</ol>
+<p class="small muted">核对方式：三处都能在 <a href="../reference/architecture-map.html">架构地图</a> 的“调用链”与“模块职责”中找到对应说明。</p>
+
+<h2 id="source">5. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../next/architecture.md">docs/next/architecture.md</a> — 当前调用关系与归属（约 50 行，建议完整读一遍）。</li>
+  <li>配合阅读：<a href="../../../../mineru/parser/mineru_parser.py">mineru/parser/mineru_parser.py</a>、<a href="../../../../mineru/backend/analyze.py">mineru/backend/analyze.py</a>、<a href="../../../../mineru/backend/analysis/pdf/pipeline.py">mineru/backend/analysis/pdf/pipeline.py</a>。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>完成本课后，进入 <a href="0002-choose-the-right-tier.html">课程 02 · 选对档位</a>。如果哪一步不清楚，直接问你的教师（agent）——把你不确定的那一行代码贴出来即可。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 01 · 参考：<a href="../reference/architecture-map.html">架构地图</a> · <a href="../reference/glossary.html">术语表</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

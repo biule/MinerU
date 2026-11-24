@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 15：小图 OCR 扩展 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0014-batch-pipeline-and-field-extraction.html">← 课程 14</a>
+  <a href="0016-finetune-evaluation-and-quantization.html">课程 16 →</a>
+  <a href="../index.html">课程目录</a>
+  <a href="../reference/architecture-map.html">架构地图</a>
+  <a href="../reference/glossary.html">术语表</a>
+</nav>
+
+<p class="eyebrow">Lesson 15 · 扩展案例</p>
+<h1>小图 OCR：从 Layout 盲区到专用 API</h1>
+<p class="lede">这节课只做一件事：当整页流水线对极小图片返回空结果时，能判断根因、绕开版面模型直接调用 OCR 原子模型，并把它封装成一个有边界、可部署的专用 API。</p>
+
+<div class="callout">
+  <strong>为什么学这个：</strong>这是“扩展 fork”的典型形态：不修改主流水线，而是在正确的层级增加一条受控旁路。课程 08 给的是清单，本课是一次完整演练。
+</div>
+
+<h2 id="outcome">你将能够</h2>
+<ul>
+  <li>区分“版面模型没看见”和“OCR 识别错”两类问题。</li>
+  <li>用 <code>AtomModelSingleton</code> 按当前后端/设备直接调用 OCR，而不是绕过运行时。</li>
+  <li>解释为什么小图会被整页 Layout 处理漏掉，以及哪些过滤规则会放大问题。</li>
+  <li>实现一个带鉴权、大小限制、并发边界与错误映射的专用 OCR 端点。</li>
+  <li>判断该端点应放在独立服务、file-parse、doclib 还是 api-server。</li>
+</ul>
+
+<h2 id="symptom">1. 现象：210×18 的图片，整页解析返回空</h2>
+<pre><code># 典型复现
+from mineru.parser import parse
+
+result = parse("crop_210x18.png", tier="standard", ocr_mode="ocr")
+print(len(result.pages), result.structured_content())
+# → 1 页，但没有任何文本块</code></pre>
+<ul>
+  <li>图片本身清晰、文字可读，直接看像素没有问题。</li>
+  <li>换成更大的截图或把图放大 3 倍后重新解析，往往能出结果。</li>
+  <li>同一个 API 对整页扫描件工作正常，只有极小输入失败。</li>
+</ul>
+
+<h2 id="cause">2. 根因：整页 Layout 与小图的分辨率矛盾</h2>
+<div class="flow">
+  <div class="node dark"><strong>输入图片</strong>转成 PDF 页面（页面尺寸≈图片尺寸）</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>页面级 Layout</strong>整页缩放到模型输入尺寸</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>小区域信息不足</strong>检测框过小/置信度低 → 被过滤</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>后续阶段无事可做</strong>没有块 → 没有 OCR → 空结果</div>
+</div>
+
+<pre><code># model/layout/pp_doclayout_v2_base.py —— 小框会被显式过滤
+x1, y1, x2, y2 = box["bbox"]
+width = float(x2) - float(x1)
+height = float(y2) - float(y1)
+if (width < 6.0 or height < 6.0) and (drop_inline_formula or not cls._is_inline_formula_box(box)):
+    dropped_indexes.add(i)</code></pre>
+<ul>
+  <li>Layout 是<strong>页面级</strong>模型：它先看整页，再给出块。极小页面/极小区域在缩放后只剩几个像素，检测不到是设计取舍，不是“识别模型坏了”。</li>
+  <li>过滤规则会再丢掉宽或高小于 6 的框；对本身就只有十几像素高的裁剪图，余量非常小。</li>
+  <li>图片转 PDF 后没有原生文本层，<code>txt</code> 路径无从取证，只能依赖 OCR；而 OCR 又依赖 Layout 先给出块。</li>
+  <li>解决办法不是调大阈值（会影响正常页面），而是<strong>在需要时绕开 Layout，直接 OCR</strong>。</li>
+</ul>
+
+<h2 id="verify">3. 先验证，再绕行</h2>
+<pre><code># 1) 看解析结果里到底有没有块
+items = render(result.middle_json, RenderFormat.CONTENT_LIST)
+print([i["type"] for i in items])          # [] → 没有块，不是识别错字
+
+# 2) 换更大输入/更高 tier 复测
+parse("crop_210x18_x3.png", tier="advanced", ocr_mode="ocr")
+
+# 3) 直接 OCR 同一张图；如果能出字，根因就在 Layout
+# 见下一节</code></pre>
+<table>
+  <thead><tr><th>现象</th><th>根因</th><th>动作</th></tr></thead>
+  <tbody>
+    <tr><td>结果为空列表</td><td>Layout 没给出块</td><td>直接 OCR 或放大输入</td></tr>
+    <tr><td>有块但文字错</td><td>OCR/VLM 识别问题</td><td>换语言、换引擎、微调（课程 10–12）</td></tr>
+    <tr><td>块位置错、串行</td><td>阅读顺序/几何映射</td><td>查 Layout 后处理，不要绕行</td></tr>
+    <tr><td>只在极小图失败</td><td>分辨率/过滤</td><td>本课的专用旁路</td></tr>
+  </tbody>
+</table>
+
+<h2 id="direct">4. 直调 OCR 原子模型</h2>
+<p>不要直接 <code>PytorchPaddleOCR()</code> 或手拼 ONNX 路径；使用 <code>AtomModelSingleton</code>，它会按当前配置选择 ONNX/Torch、设备、语言和权重缓存。</p>
+<pre><code># tools/direct_ocr.py —— 最小直调示例（Python 3.11+）
+from mineru.model.runtime.contracts import AtomicModelName
+from mineru.model.runtime.hybrid import AtomModelSingleton
+
+
+def get_ocr_engine(lang: str = "ch"):
+    """按运行时配置获取共享 OCR 引擎；首次调用才加载权重。"""
+    return AtomModelSingleton().get_atom_model(
+        atom_model_name=AtomicModelName.OCR,
+        small_backend=None,          # None → resolve_small_model_backend()
+        device=None,                 # None → ONNX CPU / Torch get_device()
+        lang=lang,                   # "ch" 普通文字；"seal" 印章
+        det_db_box_thresh=0.5,
+        det_db_unclip_ratio=1.5,
+        enable_merge_det_boxes=True,
+    )
+
+
+def ocr_image_bytes(data: bytes, lang: str = "ch") -> list[dict]:
+    engine = get_ocr_engine(lang)
+    batch = engine.ocr(data)         # bytes 由 check_img 解码为 BGR ndarray
+    lines: list[dict] = []
+    for page_res in batch or []:
+        for box, (text, score) in page_res or []:
+            lines.append({"box": box, "text": text, "score": float(score)})
+    return lines</code></pre>
+
+<div class="callout">
+  <strong>返回约定：</strong><code>ocr()</code> 返回按输入顺序的列表；每页是 <code>[[四个点坐标], (text, score)]</code> 的列表，或 <code>None</code>。坐标是<strong>输入图像像素</strong>，不是 0–1000，也不是页面坐标。
+</div>
+
+<table>
+  <thead><tr><th>配置</th><th>效果</th></tr></thead>
+  <tbody>
+    <tr><td><code>lang="ch"</code></td><td>普通文字；字符表 PP-OCRv6</td></tr>
+    <tr><td><code>lang="seal"</code></td><td>印章模式；多边形检测、专用裁剪与阈值</td></tr>
+    <tr><td><code>small_backend="onnx"</code></td><td>CPU、DirectML/WebGPU 等 ONNX 路径</td></tr>
+    <tr><td><code>small_backend="torch"</code></td><td>CUDA/MPS/XPU 等 Torch 路径</td></tr>
+    <tr><td><code>enable_merge_det_boxes</code></td><td>合并相邻检测框；小图可先保持默认，再按样本调整</td></tr>
+  </tbody>
+</table>
+
+<h2 id="api">5. 封装成专用 API</h2>
+<p>推荐先做<strong>独立小服务</strong>：它不改变 Tasks/Doclib 契约，失败也不会影响主解析。等它稳定并成为产品能力，再提升为 kit 路由。</p>
+<pre><code># tools/image_ocr_service.py —— 独立 FastAPI 服务骨架
+from __future__ import annotations
+
+import asyncio
+import threading
+
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
+
+MAX_BYTES = 8 * 1024 * 1024
+API_KEY = ""                           # 生产从环境变量读取
+app = FastAPI(title="MinerU image OCR")
+
+_engine = None
+_engine_lock = threading.Lock()
+_infer_lock = threading.Lock()
+
+
+def _get_engine():
+    """惰性加载：import 不触发重依赖，首次请求才初始化模型。"""
+    global _engine
+    if _engine is None:
+        with _engine_lock:
+            if _engine is None:
+                from mineru.model.runtime.contracts import AtomicModelName
+                from mineru.model.runtime.hybrid import AtomModelSingleton
+
+                _engine = AtomModelSingleton().get_atom_model(
+                    atom_model_name=AtomicModelName.OCR,
+                    lang="ch",
+                    det_db_box_thresh=0.5,
+                    det_db_unclip_ratio=1.5,
+                    enable_merge_det_boxes=True,
+                )
+    return _engine
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok"}
+
+
+@app.post("/v1/image-ocr")
+async def image_ocr(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    if API_KEY and authorization != f"Bearer {API_KEY}":
+        raise HTTPException(status_code=401, detail="invalid_api_key")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty_file")
+    if len(data) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail="file_too_large")
+
+    def run():
+        engine = _get_engine()
+        with _infer_lock:                      # 共享本地模型对象串行推理
+            return engine.ocr(data)
+
+    try:
+        batch = await asyncio.to_thread(run)
+    except Exception as exc:
+        return JSONResponse(status_code=503, content={"error": {"code": "ocr_failed", "message": str(exc)}})
+
+    lines = []
+    for page_res in batch or []:
+        for box, (text, score) in page_res or []:
+            lines.append({"box": box, "text": text, "score": float(score)})
+    return JSONResponse(content={"lines": lines, "count": len(lines)})</code></pre>
+
+<pre><code># 启动与调用
+uvicorn tools.image_ocr_service:app --host 127.0.0.1 --port 8010
+curl -X POST http://127.0.0.1:8010/v1/image-ocr \
+  -H "Authorization: Bearer $OCR_API_KEY" \
+  -F "file=@crop_210x18.png"</code></pre>
+
+<table>
+  <thead><tr><th>落点</th><th>适合</th><th>代价</th></tr></thead>
+  <tbody>
+    <tr><td>独立 FastAPI 服务</td><td>专用旁路、快速验证、与主服务隔离</td><td>多一个部署单元与鉴权面</td></tr>
+    <tr><td><code>mineru/kit/file_parse</code></td><td>已有单文件同步包装、需要复用其上传/恢复</td><td>要遵循其请求/记录生命周期</td></tr>
+    <tr><td><code>mineru/doclib</code> 服务路由</td><td>需要入库、缓存、locator、权限</td><td>引入状态与迁移成本</td></tr>
+    <tr><td><code>api-server</code></td><td>要成为正式产品能力、进入 Tasks 契约</td><td>需要协议、错误码、测试全套</td></tr>
+  </tbody>
+</table>
+
+<h2 id="guardrails">6. 护栏：旁路也必须守规矩</h2>
+<table>
+  <thead><tr><th>#</th><th>检查</th><th>做法</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>导入无副作用</td><td>重依赖在函数内导入；模块只定义 app 与常量</td></tr>
+    <tr><td>2</td><td>走统一运行时</td><td>用 <code>AtomModelSingleton</code>，不手拼权重路径</td></tr>
+    <tr><td>3</td><td>资源边界</td><td>大小上限、像素上限、并发信号量、超时</td></tr>
+    <tr><td>4</td><td>安全</td><td>默认 loopback；API Key；不接受任意 URL</td></tr>
+    <tr><td>5</td><td>隐私</td><td>本地 OCR 不上传；若要远程，必须显式配置 VLM/服务地址</td></tr>
+    <tr><td>6</td><td>可观测</td><td>请求 ID、耗时、图片尺寸、命中行数；失败保留错误码</td></tr>
+  </tbody>
+</table>
+
+<h2 id="debug">7. 何时不该用这条旁路</h2>
+<ul>
+  <li><strong>整页文档</strong>仍应走主流水线：Layout 提供阅读顺序、表格/公式结构，直调 OCR 会丢掉这些语义。</li>
+  <li><strong>需要表格/公式</strong>：直调 OCR 只给文字行；表格结构和公式 LaTeX 属于 MFR/表格模型或 VLM。</li>
+  <li><strong>需要 locator/缓存</strong>：应该用 Doclib，而不是自己维护一套文件索引。</li>
+  <li><strong>输入是扫描页</strong>：优先用 <code>standard</code> 或 <code>basic</code> 的整页流水线，旁路只处理“页面级模型确实看不见”的极小输入。</li>
+</ul>
+
+<h2 id="quiz">8. 检索练习</h2>
+
+<div class="quiz" data-explanation="直调 OCR 跳过页面级 Layout；它只解决“Layout 没给出块”，不提供阅读顺序与表格/公式结构。">
+  <h3>Q1. 直调 OCR 绕过了哪一层？</h3>
+  <button class="quiz-option">OCR 识别</button>
+  <button class="quiz-option" data-correct="true">页面 Layout</button>
+  <button class="quiz-option">终态输出</button>
+  <button class="quiz-option">文档后处理</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="OCR 原子模型返回的 box 是输入图像像素坐标；Content List 才是 0–1000，MiddleJson 是 0–1。">
+  <h3>Q2. 直调 <code>engine.ocr()</code> 的 box 坐标单位是？</h3>
+  <button class="quiz-option">0–1 归一化</button>
+  <button class="quiz-option">0–1000 整数</button>
+  <button class="quiz-option" data-correct="true">输入图像像素</button>
+  <button class="quiz-option">PDF 点</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="AtomModelSingleton 统一处理 ONNX/Torch、设备、语言、权重缓存；手实例化会绕过这些选择并与主流程脱节。">
+  <h3>Q3. 应该怎样获得 OCR 引擎？</h3>
+  <button class="quiz-option">直接 new 类</button>
+  <button class="quiz-option" data-correct="true">原子模型单例</button>
+  <button class="quiz-option">读取环境变量</button>
+  <button class="quiz-option">复制权重路径</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="公开 API 层不得在 import 时加载 torch/onnx 等重依赖；重依赖应在实际处理请求时惰性导入。">
+  <h3>Q4. OCR 模型应在何时导入/初始化？</h3>
+  <button class="quiz-option">模块导入时</button>
+  <button class="quiz-option">进程启动前</button>
+  <button class="quiz-option" data-correct="true">首次请求时</button>
+  <button class="quiz-option">每次请求内</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">9. 动手挑战</h2>
+<ol>
+  <li>从一份发票上裁出 <code>210×18</code> 的字段图，分别用整页 <code>parse(tier="standard", ocr_mode="ocr")</code> 与直调 OCR，记录输出差异。</li>
+  <li>把直调脚本封装成上面的 FastAPI 服务，用 <code>curl</code> 调通；再加一个“空文件 / 超大文件 / 错误 Key”的测试。</li>
+  <li>把服务输出与整页解析结果对照：哪些字段直调更好，哪些必须依赖 Layout（阅读顺序、表格、公式）？写进 NOTES。</li>
+  <li>给端点加一个并发上限（信号量），用 10 个并发请求压测，观察延迟与内存。</li>
+</ol>
+
+<h2 id="review">10. 本课小结</h2>
+<table>
+  <thead><tr><th>掌握点</th><th>证据</th></tr></thead>
+  <tbody>
+    <tr><td>能区分 Layout 漏检与 OCR 识别错</td><td>能说出“空列表 vs 错文字”的不同根因</td></tr>
+    <tr><td>能安全直调 OCR</td><td>用 AtomModelSingleton，未手拼权重路径</td></tr>
+    <tr><td>能封装受控 API</td><td>有鉴权、大小限制、并发边界、错误码</td></tr>
+    <tr><td>能判断何时不该绕行</td><td>表格/公式/阅读顺序/缓存场景仍走主流水线</td></tr>
+  </tbody>
+</table>
+
+<h2 id="source">11. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../../mineru/model/runtime/hybrid.py">model/runtime/hybrid.py</a> — <code>AtomModelSingleton</code> 与 OCR 初始化。</li>
+  <li>配合阅读：<a href="../../../../mineru/model/ocr/pp_ocr_v6_onnx.py">pp_ocr_v6_onnx.py</a>、<a href="../../../../mineru/model/ocr/pytorch_paddle.py">pytorch_paddle.py</a>（统一 <code>ocr()</code> 契约）。</li>
+  <li>失败证据：<a href="../../../../mineru/model/layout/pp_doclayout_v2_base.py">pp_doclayout_v2_base.py</a> 的 <code>_apply_paddlex_filter_boxes</code>。</li>
+  <li>服务落点：<a href="../../../../mineru/kit/file_parse/app.py">kit/file_parse/app.py</a>、<a href="../../../next/cli/mineru-kit-api-server.md">api-server 文档</a>。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0016-finetune-evaluation-and-quantization.html">课程 16 · 微调验收与量化</a>——模型改完后，如何证明它真的变好。把你的直调输出与整页输出贴给教师（agent）。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 15 · 参考：<a href="../reference/architecture-map.html">架构地图</a> · <a href="../reference/glossary.html">术语表</a> · <a href="../reference/commands.html">命令速查</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

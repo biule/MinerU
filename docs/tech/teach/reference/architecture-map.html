@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>参考：架构地图 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="../lessons/0001-trace-a-pdf.html">← 课程 01</a>
+  <a href="../lessons/0002-choose-the-right-tier.html">课程 02</a>
+  <a href="tier-matrix.html">档位矩阵</a>
+  <a href="glossary.html">术语表</a>
+  <a href="commands.html">命令速查</a>
+</nav>
+
+<p class="eyebrow">Reference · Architecture</p>
+<h1>架构地图</h1>
+<p class="lede">MinerU 4.1.7 的分层、调用链与模块职责。用于在改动前快速定位“应该改哪里”。</p>
+
+<h2 id="layers">1. 分层</h2>
+
+<div class="flow">
+  <div class="node dark"><strong>入口层</strong>mineru CLI · mineru-kit · Python SDK · V1 API · WebUI</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>MinerU 产品层</strong>parser · backend · model · render · doclib · tasks · kit/router</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>DocVortex 共享层</strong>原生格式解析 · PDF 访问与分类 · schema · 确定性后处理 · 七种通用 renderer · export</div>
+</div>
+
+<div class="callout">
+  <strong>边界：</strong>依赖单向。MinerU 可以使用 DocVortex 的公开接口，但不得导入其私有实现；DocVortex 也不得反向依赖 MinerU。
+  依据：<code>CLAUDE.md</code>「DocVortex 与 MinerU 的文档架构」。
+</div>
+
+<h2 id="chains">2. 三条调用链</h2>
+
+<h3 id="chain-stateless">2.1 无状态解析</h3>
+<pre><code>mineru-kit parse / Python parse()
+  → MinerUParser._prepare_input()        # 类型识别、图片转 PDF、页范围
+  → doc_analyze()                        # 统一分析门面
+      → analyze_pdf()                    # PDF：窗口流水线
+      → analyze_office() / html() / …    # 原生格式：DocVortex
+  → ModelJson                            # 内部原始结果
+  → model_json_to_middle_json()          # DocVortex 确定性后处理
+  → apply_llm_aided_postprocess()        # 可选 LLM 增强（默认关）
+  → ParseResult(middle_json)             # SDK 结果
+  → render() / save()                    # 九种输出 / 结果包</code></pre>
+
+<h3 id="chain-doclib">2.2 Doclib 文档库</h3>
+<pre><code>mineru parse / read / search
+  → DoclibClient                        # 读取 endpoint 文件发现服务
+  → Doclib Server (/api/v1)
+      → IngestService                   # 路径入库、sha256 身份
+      → ParseQueueService               # 缓存覆盖、按页排队、优先级
+      → ParseWorkerPool                 # 抢占批次
+      → ParseExecutionService           # 本地 Flash 或 API 解析
+      → SQLite + parsed/ 批次 JSON      # 持久化
+      → ContentReadService              # locator / context / limit / 导出</code></pre>
+
+<h3 id="chain-http">2.3 HTTP Tasks</h3>
+<pre><code>POST /v1/tasks
+  → tasks/service.py                    # 父任务与逐文件状态
+  → ApiTaskBackend                      # 文件存储、上传、执行
+  → 同一解析门面（MinerUParser / analyze）
+  → task_outputs.build_task_output()    # default / docx / html / latex
+  → GET /v1/tasks/{id}                  # 每文件独立结果链接</code></pre>
+
+<h3 id="chain-vlm">2.4 VLM 运行时</h3>
+<pre><code>backend/analysis/pdf/window.py            # high / xhigh 的 VLM 阶段
+  → get_vlm_predictor()                   # 读配置、校验环境
+      → server_url 非空 → http-client
+      → 否则 → resolve_vlm_engine() → 本地引擎
+  → ModelSingleton.get_model()            # 按缓存键复用、初始化屏障
+  → VlmPredictor                          # 抽取 / 两步 / 文本切片（含 aio 版本）
+  → RuntimeOwner 释放                     # 最后一个引用关闭</code></pre>
+
+<h2 id="modules">3. 模块职责</h2>
+
+<table>
+  <thead><tr><th>路径</th><th>职责</th><th>改动入口</th></tr></thead>
+  <tbody>
+    <tr><td><code>mineru/parser/</code></td><td>输入准备、tier→effort、页范围、本地/远程解析门面</td><td>新增输入类型前置逻辑、SDK 参数</td></tr>
+    <tr><td><code>mineru/backend/analyze.py</code></td><td>统一分析门面、按后缀路由、构造 ModelJson</td><td>新增格式路由、元数据</td></tr>
+    <tr><td><code>mineru/backend/analysis/pdf/</code></td><td>PDF 生命周期、窗口编排、layout/OCR/MFR/表格/VLM</td><td>解析质量、阶段顺序</td></tr>
+    <tr><td><code>mineru/backend/analysis/</code></td><td>Office/ODF/EPUB/OFD/HTML/MHTML/CSV 原生分析</td><td>原生格式接入</td></tr>
+    <tr><td><code>mineru/backend/postprocess/</code></td><td>确定性后处理边界、可选 LLM 增强、历史兼容</td><td>后处理策略</td></tr>
+    <tr><td><code>mineru/model/</code></td><td>layout/OCR/MFR/table/VLM 推理与模型生命周期</td><td>模型、设备、引擎</td></tr>
+    <tr><td><code>mineru/render/</code></td><td>九种输出门面与选项</td><td>新增输出格式</td></tr>
+    <tr><td><code>mineru/doclib/</code></td><td>SQLite、FTS、入库、排队、执行、读取、后台任务</td><td>缓存、读取、服务 API</td></tr>
+    <tr><td><code>mineru/tasks/</code></td><td>Tasks 协议、编排、执行、HTTP 路由</td><td>HTTP 行为</td></tr>
+    <tr><td><code>mineru/kit/</code></td><td>mineru-kit 命令、API server、Router、file-parse、Gradio</td><td>服务入口</td></tr>
+    <tr><td><code>mineru/cli/</code></td><td>mineru 文档库 CLI</td><td>CLI 交互</td></tr>
+    <tr><td><code>mineru/config.py</code></td><td>两阶段配置、来源信息、VLM/LLM 配置</td><td>新增配置项</td></tr>
+    <tr><td><code>mineru/filetypes.py</code></td><td>扩展名边界、MIME 映射</td><td>新增格式</td></tr>
+    <tr><td><code>mineru/errors.py</code></td><td>错误码 → 类型 → HTTP 状态</td><td>新增错误语义</td></tr>
+  </tbody>
+</table>
+
+<h2 id="seams">4. 常见改动的落点</h2>
+
+<table>
+  <thead><tr><th>想改什么</th><th>先看这里</th><th>注意</th></tr></thead>
+  <tbody>
+    <tr><td>PDF 某阶段的行为/顺序</td><td><code>backend/analysis/pdf/window.py</code></td><td>窗口准备/推理/收尾的锁边界</td></tr>
+    <tr><td>档位默认选择</td><td><code>parser/tier.py</code>、<code>types.py</code> 的选择顺序</td><td>不同入口的默认策略不同</td></tr>
+    <tr><td>VLM 引擎</td><td><code>model/vlm/selector.py</code>、<code>runtime.py</code></td><td>同步 + 原生异步两条路径</td></tr>
+    <tr><td>小模型后端</td><td><code>model/runtime/device.py</code>、<code>hybrid.py</code></td><td>ONNX/Torch 都要验证</td></tr>
+    <tr><td>输出格式</td><td><code>render/contracts.py</code>、<code>render/api.py</code></td><td>通用格式归 DocVortex</td></tr>
+    <tr><td>Doclib API</td><td><code>doclib/server.py</code>、<code>doclib/client.py</code></td><td>服务端/客户端路径保持一致</td></tr>
+    <tr><td>HTTP 任务</td><td><code>tasks/http.py</code>、<code>parser/task_backend.py</code></td><td>状态机与文件独立完成</td></tr>
+  </tbody>
+</table>
+
+<h2 id="sources">来源</h2>
+<ul class="small">
+  <li><a href="../../../next/architecture.md">docs/next/architecture.md</a> — 当前调用关系与归属</li>
+  <li><a href="../../../next/code-map.md">docs/next/code-map.md</a> — 模块地图</li>
+  <li><a href="../../../../mineru/parser/mineru_parser.py">mineru/parser/mineru_parser.py</a>、<a href="../../../../mineru/backend/analyze.py">mineru/backend/analyze.py</a></li>
+  <li><a href="../../../../CLAUDE.md">CLAUDE.md</a> — DocVortex 边界与工程约束</li>
+</ul>
+
+<p class="footer">MinerU 4.1.7 · 参考文档 · 有任何不清楚的地方，直接向你的教师（agent）提问。</p>
+
+</div>
+</body>
+</html>

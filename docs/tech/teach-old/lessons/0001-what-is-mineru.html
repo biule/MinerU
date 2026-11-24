@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lesson 1: 认识 MinerU — 它能做什么？</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<h1>第 1 课：认识 MinerU — 它能做什么？</h1>
+
+<p class="meta">
+  <span>📅 2026-07-14</span>
+  <span>⏱ 阅读时间：20 分钟</span>
+  <span>🎯 目标：理解 MinerU 是什么，完成第一次文档解析</span>
+</p>
+
+<div class="callout info">
+  <strong>🎯 本节课你将学会</strong>
+  <p>✅ 理解什么是"文档解析"以及它为什么难<br>
+  ✅ 了解 MinerU 能解决什么问题<br>
+  ✅ 完成 MinerU 的安装<br>
+  ✅ 成功解析第一个文档并看懂输出</p>
+</div>
+
+<h2>1. 一个被低估的难题</h2>
+
+<p>假设你手头有 1000 份 PDF 发票，想自动提取出所有发票号码、日期和金额。</p>
+
+<p>你可能会想："这不就是复制粘贴吗？"—— 但现实远比这复杂。</p>
+
+<h3>PDF 的"美丽谎言"</h3>
+
+<p>PDF 的设计初衷是"无论在哪台设备上打开，看起来都一样"。它记录的是"把这段文字放在这个坐标"，而不是"这是一个标题，这是一个表格单元格"。所以 PDF 本质上是一组绘图指令，不是结构化文档。</p>
+
+<div class="callout warning">
+  <strong>⚠️ 常见的坑</strong>
+  <p>即便是最简单的 PDF，直接用代码提取文字也可能遇到：文字顺序错乱、同一段落被拆成多个碎片、表格无法识别、公式变成乱码。扫描件本质是图片，连文字都"没有"。</p>
+</div>
+
+<p>这就需要一个工具来<strong>理解</strong>文档的结构——这就是<strong>文档解析</strong>（Document Parsing）。</p>
+
+<h2>2. 什么是 MinerU？</h2>
+
+<p><strong>MinerU</strong> 是一个开源的高精度文档解析引擎，由上海人工智能实验室（OpenDataLab）开发，诞生于 <a href="https://github.com/InternLM/InternLM" target="_blank">InternLM</a> 大模型的预训练过程中。</p>
+
+<table>
+  <tr><th>属性</th><th>说明</th></tr>
+  <tr><td>开发者</td><td>OpenDataLab（上海人工智能实验室）</td></tr>
+  <tr><td>当前版本</td><td>3.4.4</td></tr>
+  <tr><td>输入格式</td><td>PDF、图片（JPG/PNG/...）、DOCX、PPTX、XLSX</td></tr>
+  <tr><td>输出格式</td><td>Markdown、JSON</td></tr>
+  <tr><td>许可证</td><td>MinerU 开源许可证（基于 Apache 2.0）</td></tr>
+  <tr><td>GitHub Stars</td><td>28k+</td></tr>
+</table>
+
+<h3>它能做什么？</h3>
+
+<ul>
+  <li>把 PDF（包括扫描件）转成结构清晰的 Markdown</li>
+  <li>识别文档中的 <strong>标题层级</strong>（h1、h2、h3...）</li>
+  <li>提取 <strong>表格</strong> 并转为 HTML 格式</li>
+  <li>将 <strong>数学公式</strong> 转为 LaTeX</li>
+  <li>提取 <strong>图片</strong> 及其描述</li>
+  <li>自动删除页眉、页脚、页码等干扰信息</li>
+  <li>支持 <strong>109 种语言</strong> 的 OCR 识别</li>
+</ul>
+
+<h3>它不能做什么？</h3>
+
+<ul>
+  <li>不能"理解"文档内容的语义（它做的是结构解析，不是文档问答）</li>
+  <li>不能生成新的文档（它读文档，不写文档）</li>
+  <li>不是通用的 PDF 编辑器</li>
+</ul>
+
+<h2>3. 核心概念速览</h2>
+
+<h3>PDF 的两种"性格"</h3>
+
+<p>PDF 实际上分两种，MinerU 对它们的处理方式完全不同：</p>
+
+<table>
+  <tr><th>类型</th><th>描述</th><th>MinerU 怎么做</th></tr>
+  <tr><td><strong>文本型 PDF</strong></td><td>由文字构成（如 Word 导出的 PDF）</td><td>直接提取文字 → 分析布局</td></tr>
+  <tr><td><strong>扫描型 PDF</strong></td><td>由图片构成（如扫描仪生成的 PDF）</td><td>先用 OCR 识别图中文字 → 再分析布局</td></tr>
+</table>
+
+<p>MinerU 能<strong>自动检测</strong> PDF 的类型，你不用手动区分。</p>
+
+<h3>三个处理引擎 <span class="tag primary">重要</span></h3>
+
+<p>MinerU 提供三个解析引擎，你可以在使用前选择：</p>
+
+<table>
+  <tr><th>引擎</th><th>特点</th><th>适合场景</th></tr>
+  <tr><td><strong>pipeline</strong></td><td>传统深度学习模型分步处理，CPU/GPU 均可，资源占用低</td><td>普通文档，服务器配置有限</td></tr>
+  <tr><td><strong>vlm-engine</strong></td><td>基于视觉语言模型，一步完成理解，精度最高，需要 GPU</td><td>复杂排版、高精度要求的文档</td></tr>
+  <tr><td><strong>hybrid-engine</strong> <span class="tag success">默认推荐</span></td><td>混合策略，结合前两者的优势，速度和精度的最佳平衡</td><td>日常使用，大多数场景</td></tr>
+</table>
+
+<p>目前你只需要知道有这三个选项，我们后续会详细学习它们的区别。</p>
+
+<h2>4. 安装 MinerU</h2>
+
+<p>我们先在你的机器上安装 MinerU。确保你已经安装了 Python 3.10 ~ 3.13。</p>
+
+<div class="step">
+  <h4>检查 Python 版本</h4>
+  <pre><code>python --version</code></pre>
+  <p>应该显示 <code>Python 3.10.x</code> 到 <code>3.13.x</code>。如果版本过低，请先升级 Python。</p>
+</div>
+
+<div class="step">
+  <h4>安装 uv（推荐）或直接使用 pip</h4>
+  <p>MinerU 官方推荐使用 <code>uv</code> 来安装，速度更快：</p>
+  <pre><code>pip install uv</code></pre>
+  <p>或者直接使用 pip 也可以，只是慢一些。</p>
+</div>
+
+<div class="step">
+  <h4>安装 MinerU</h4>
+  <pre><code>uv pip install -U "mineru[all]"</code></pre>
+  <p>这个命令会安装 MinerU 及其所有依赖（包括 pipeline 和 VLM 后端）。</p>
+</div>
+
+<div class="step">
+  <h4>验证安装</h4>
+  <pre><code>mineru --help</code></pre>
+  <p>如果看到帮助信息，说明安装成功。</p>
+</div>
+
+<div class="callout tip">
+  <strong>💡 安装提示</strong>
+  <p>在项目的 <code>pyproject.toml</code> 中可以看到，MinerU 的依赖分为几个可选组：<code>pipeline</code>（传统引擎）、<code>vlm</code>（VLM 引擎）、<code>gradio</code>（Web 界面）等。<code>[all]</code> 会安装全部。如果只想安装轻量版，可以只装 <code>mineru</code> 基本包。</p>
+</div>
+
+<h2>5. 第一次解析：跑通一个文档</h2>
+
+<p>安装完成后，我们用 MinerU 自带的 demo 来解析一个示例 PDF。</p>
+
+<div class="step">
+  <h4>使用 demo 目录</h4>
+  <p>在 MinerU 项目根目录下，有一个 <code>demo/</code> 文件夹，里面包含示例 PDF 和 Office 文档：</p>
+  <pre><code>ls demo/pdfs/</code></pre>
+</div>
+
+<div class="step">
+  <h4>运行解析</h4>
+  <pre><code>mineru demo/pdfs --output-dir demo/output</code></pre>
+  <p>这里 <code>demo/pdfs</code> 是输入目录（包含示例 PDF），<code>--output-dir demo/output</code> 指定输出目录。</p>
+</div>
+
+<div class="step">
+  <h4>查看输出</h4>
+  <p>运行完成后，查看输出目录：</p>
+  <pre><code>ls demo/output/</code></pre>
+  <p>你会看到每个输入 PDF 对应的输出文件夹，里面包含：</p>
+  <ul>
+    <li><code>*.md</code> — 解析结果的 Markdown 文件</li>
+    <li><code>*.json</code> — 解析结果的 JSON 文件（如果开启）</li>
+    <li><code>images/</code> — 提取出的图片</li>
+  </ul>
+</div>
+
+<div class="callout success">
+  <strong>🎉 恭喜！</strong>
+  <p>你已经成功完成了第一次文档解析。打开 <code>.md</code> 文件，比较一下与原始 PDF 的差异。你会看到 MinerU 自动去除了页眉页脚，保留了标题层级，表格和公式都被正确识别了。</p>
+</div>
+
+<h2>6. 理解输出：Markdown</h2>
+
+<p>Markdown 是一种轻量级标记语言，它用简单的符号表示格式：</p>
+
+<table>
+  <tr><th>原始 PDF</th><th>Markdown 输出</th></tr>
+  <tr><td>大标题</td><td><code># 大标题</code></td></tr>
+  <tr><td>小标题</td><td><code>## 小标题</code></td></tr>
+  <tr><td><strong>粗体</strong></td><td><code>**粗体**</code></td></tr>
+  <tr><td>列表项</td><td><code>- 列表项</code></td></tr>
+  <tr><td>表格</td><td><code>| 列1 | 列2 |</code></td></tr>
+  <tr><td>公式 E=mc²</td><td><code>$$ E=mc^2 $$</code></td></tr>
+  <tr><td>图片</td><td><code>![图片描述](images/xxx.jpg)</code></td></tr>
+</table>
+
+<p>Markdown 的好处是：人类可读、机器友好、可以方便地导入各种系统（LLM、RAG、文档管理系统）。</p>
+
+<h2>7. 小测验：检查你的理解</h2>
+
+<div class="quiz">
+  <p><strong>问题 1：</strong> 下列哪种 PDF 需要 OCR 才能提取文字？</p>
+  <ol class="quiz-options" type="A">
+    <li>从 Word 导出的 PDF</li>
+    <li>扫描仪生成的 PDF</li>
+    <li>从 Chrome 打印的 PDF</li>
+    <li>LaTeX 编译的 PDF</li>
+  </ol>
+  <details>
+    <summary>查看答案</summary>
+    <p><strong>B</strong>。扫描仪生成的 PDF 实际上是图片，不经过 OCR 无法提取文字。其余三种都是"文本型 PDF"，可以直接提取。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <p><strong>问题 2：</strong> MinerU 默认推荐的解析引擎是哪个？</p>
+  <ol class="quiz-options" type="A">
+    <li>pipeline</li>
+    <li>vlm-engine</li>
+    <li>hybrid-engine</li>
+    <li>以上都是</li>
+  </ol>
+  <details>
+    <summary>查看答案</summary>
+    <p><strong>C</strong>。hybrid-engine（混合引擎）是默认推荐，它在速度和精度之间取得最佳平衡。pipeline 资源需求低，vlm-engine 精度最高但需要 GPU。</p>
+  </details>
+</div>
+
+<div class="quiz">
+  <p><strong>问题 3：</strong> MinerU 输出哪种文件格式？</p>
+  <ol class="quiz-options" type="A">
+    <li>仅 Markdown</li>
+    <li>仅 JSON</li>
+    <li>Markdown 和 JSON</li>
+    <li>PDF</li>
+  </ol>
+  <details>
+    <summary>查看答案</summary>
+    <p><strong>C</strong>。MinerU 可以输出 Markdown 和/或 JSON 格式。Markdown 适合人类阅读和 LLM 输入，JSON 适合程序进一步处理。</p>
+  </details>
+</div>
+
+<h2>8. 回顾与下集预告</h2>
+
+<table>
+  <tr><th>本节课学到的</th><th>下一步</th></tr>
+  <tr><td>✅ 什么是文档解析</td><td>🔜 第 2 课：MinerU 的架构拆解 — 三大引擎深入对比</td></tr>
+  <tr><td>✅ MinerU 的核心功能</td><td>🔜 第 3 课：配置详解 — 用对参数才能用好</td></tr>
+  <tr><td>✅ 安装 MinerU</td><td>🔜 第 4 课：实战单证解析</td></tr>
+  <tr><td>✅ 完成第一次文档解析</td></tr>
+  <tr><td>✅ 理解 Markdown 输出</td></tr>
+</table>
+
+<div class="callout tip">
+  <strong>📖 推荐阅读</strong>
+  <p>阅读 <a href="https://opendatalab.github.io/MinerU/" target="_blank">MinerU 官方文档</a> 中的"快速开始"章节，加深理解。</p>
+  <p>阅读项目根目录的 <code>demo/demo.py</code>（约 270 行），看看 Python API 是如何调用的 — 即使现在还看不懂全部代码，先混个眼熟。</p>
+</div>
+
+<div class="callout info">
+  <strong>💬 有问题？</strong>
+  <p>随时问我！你可以问任何问题：某个概念不理解、安装报错、输出结果看不懂... 这是你学习的最大优势——有问题立刻有人解答。</p>
+</div>
+
+<div class="lesson-nav">
+  <span></span>
+  <a href="index.html">↑ 课程总目录</a>
+  <a href="0002-architecture.html">第 2 课：架构拆解 →</a>
+</div>
+
+</body>
+</html>

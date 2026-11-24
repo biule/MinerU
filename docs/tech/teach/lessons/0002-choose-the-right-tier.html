@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 02：选对档位 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="../MISSION.md">使命</a>
+  <a href="0001-trace-a-pdf.html">← 课程 01</a>
+  <a href="../reference/tier-matrix.html">档位矩阵</a>
+  <a href="../reference/architecture-map.html">架构地图</a>
+  <a href="../reference/glossary.html">术语表</a>
+  <a href="../reference/commands.html">命令速查</a>
+</nav>
+
+<p class="eyebrow">Lesson 02 · 决策</p>
+<h1>选对档位：tier、effort 与引擎</h1>
+<p class="lede">这节课只做一件事：给定一个文档、硬件和安装方式，能为一句话解释“该用哪档、会跑什么、为什么不会自动降级”。</p>
+
+<h2 id="outcome">你将能够</h2>
+<ul>
+  <li>把产品档位（tier）映射到内部强度（effort）。</li>
+  <li>解释 <code>flash</code> 与 <code>standard</code> 在 PDF 路径上的本质差异。</li>
+  <li>按硬件与依赖判断实际会选哪个小模型后端和 VLM 引擎。</li>
+  <li>说出不同入口的默认档位规则，避免“以为会降级”。</li>
+</ul>
+
+<div class="callout">
+  <strong>为什么先学这个：</strong>扩展 MinerU 时，最容易破坏的不是模型本身，而是“档位语义”。一旦默认选择或降级规则被改错，所有入口都会悄悄变差。
+</div>
+
+<h2 id="mapping">1. tier → effort</h2>
+<table>
+  <thead><tr><th>tier</th><th>effort</th><th>PDF 执行方式</th></tr></thead>
+  <tbody>
+    <tr><td><code>flash</code></td><td><code>flash</code></td><td>txt：DocVortex 原生 PDF 模型；ocr：布局小模型 + OCR</td></tr>
+    <tr><td><code>basic</code></td><td><code>medium</code></td><td>小模型：layout + OCR + MFR + 表格</td></tr>
+    <tr><td><code>standard</code></td><td><code>high</code></td><td>小模型 + VLM 单步抽取</td></tr>
+    <tr><td><code>advanced</code></td><td><code>xhigh</code></td><td>小模型 + VLM 两步抽取 + 图片分析</td></tr>
+  </tbody>
+</table>
+
+<pre><code># mineru/parser/tier.py —— 映射是显式的，不做运行时注册
+_EFFORT_BY_TIER = {
+    "flash": "flash",
+    "basic": "medium",
+    "standard": "high",
+    "advanced": "xhigh",
+}</code></pre>
+
+<h2 id="tree">2. 决策树</h2>
+
+<div class="flow">
+  <div class="node dark"><strong>输入</strong>文档类型 + tier + 硬件 + 依赖</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>是 PDF/图片吗？</strong>否 → 原生格式 → 固定 flash/txt</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>tier = flash？</strong>是 → txt 走原生；ocr 走 Flash OCR</div>
+  <div class="arrow-v"></div>
+  <div class="node"><strong>tier = basic？</strong>是 → 小模型 medium，不用 VLM</div>
+  <div class="arrow-v"></div>
+  <div class="node accent"><strong>tier = standard / advanced？</strong>小模型 + VLM（单步 / 两步）</div>
+</div>
+
+<div class="callout">
+  <strong>关键边界：</strong>原生格式（Office/ODF/EPUB/OFD/HTML/MHTML/CSV/TSV）没有 basic/standard/advanced。CLI 单文件显式质量档位会报错；Python SDK 与批量入口会归一为 <code>flash</code>。
+</div>
+
+<h2 id="engines">3. 引擎选择</h2>
+
+<h3 id="small">3.1 小模型后端（ONNX / Torch）</h3>
+<pre><code># model/runtime/device.py
+if selected in ("onnx", "torch"):
+    return selected
+
+# auto：只有 Torch 依赖齐全且设备不是 CPU 时才用 Torch
+if all(module_available(name) for name in TORCH_REQUIRED_MODULES) and get_device().split(":")[0] != "cpu":
+    return "torch"
+return "onnx"</code></pre>
+
+<h3 id="vlm">3.2 VLM 引擎</h3>
+<pre><code># model/vlm/selector.py（auto 规则）
+if 非 Linux/Windows 或设备是 CPU:
+    return "llama-cpp"
+if Linux 且安装了 vllm:
+    return "vllm"
+if 设备不是 xpu 且安装了 lmdeploy:
+    return "lmdeploy"
+return "llama-cpp"
+
+# 但：server_url 非空时，远程 HTTP 优先，不加载本地引擎</code></pre>
+
+<table>
+  <thead><tr><th>场景</th><th>实际引擎</th></tr></thead>
+  <tbody>
+    <tr><td>Windows + CPU + 基础包</td><td>ONNX 小模型 + llama.cpp VLM</td></tr>
+    <tr><td>Linux + NVIDIA + 已装 vLLM</td><td>Torch 或 ONNX 小模型 + vLLM</td></tr>
+    <tr><td>Windows + NVIDIA + 已装 LMDeploy</td><td>小模型 + LMDeploy</td></tr>
+    <tr><td>配置了 <code>model.vlm.server_url</code></td><td>远程 HTTP VLM（本地不再加载引擎）</td></tr>
+  </tbody>
+</table>
+
+<h2 id="defaults">4. 默认选择规则</h2>
+<table>
+  <thead><tr><th>入口</th><th>默认</th></tr></thead>
+  <tbody>
+    <tr><td>Python <code>parse()</code></td><td><code>standard</code>；不接受 <code>None/auto</code></td></tr>
+    <tr><td><code>mineru-kit parse</code></td><td>PDF/图片 <code>standard</code>；原生格式 <code>flash</code></td></tr>
+    <tr><td>Tasks / HTTP SDK</td><td><code>standard → basic → flash → advanced</code></td></tr>
+    <tr><td>Doclib 主动质量解析</td><td><code>standard → basic</code>；无可用档位报错</td></tr>
+    <tr><td>Doclib 已缓存读取</td><td><code>advanced → standard → basic</code>；不新建解析</td></tr>
+    <tr><td>Doclib parsing rule</td><td><code>standard → basic → flash</code></td></tr>
+  </tbody>
+</table>
+
+<p class="small muted">显式请求不支持的档位会返回错误，不会静默改档。服务启动的 <code>--tier</code> 是能力上限，不是单次请求档位。</p>
+
+<h2 id="quiz">5. 检索练习</h2>
+
+<div class="quiz" data-explanation="basic 映射到 medium：只跑小模型（layout/OCR/MFR/表格），不调用 VLM。">
+  <h3>Q1. <code>basic</code> 档位对应的内部 effort 是？</h3>
+  <button class="quiz-option">flash</button>
+  <button class="quiz-option" data-correct="true">medium</button>
+  <button class="quiz-option">high</button>
+  <button class="quiz-option">xhigh</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="Standard 与 Advanced 共用部署模型；Advanced 增加推理投入与图片分析，而不是换一套模型。">
+  <h3>Q2. <code>standard</code> 与 <code>advanced</code> 在模型部署上的关系是？</h3>
+  <button class="quiz-option" data-correct="true">共用模型</button>
+  <button class="quiz-option">各自独立</button>
+  <button class="quiz-option">仅用远端</button>
+  <button class="quiz-option">仅用本地</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="只有 advanced（xhigh）会把 image_analysis 传给 VLM；standard 不开启。">
+  <h3>Q3. 哪个档位会开启图片分析（image_analysis）？</h3>
+  <button class="quiz-option">flash</button>
+  <button class="quiz-option">basic</button>
+  <button class="quiz-option">standard</button>
+  <button class="quiz-option" data-correct="true">advanced</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="mineru parse 默认只读前 10 页（doclib parse_policy.default_parse_range）；整本需要 --pages all。">
+  <h3>Q4. <code>mineru parse</code> 默认读取前多少页？</h3>
+  <button class="quiz-option">一页</button>
+  <button class="quiz-option">五页</button>
+  <button class="quiz-option" data-correct="true">十页</button>
+  <button class="quiz-option">全部</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">6. 场景练习</h2>
+<p>先自己回答，再打开源码核对。不要查资料，先凭记忆写出来。</p>
+<ol>
+  <li><strong>Windows + CPU + 只装了基础包</strong>，用户要“正常阅读质量”。选哪档？实际会跑哪些模型？</li>
+  <li><strong>Linux + NVIDIA + 已装 vLLM</strong>，要处理大量 PDF。选哪档？VLM 引擎是什么？</li>
+  <li><strong>用户上传一个 <code>.docx</code></strong>，并显式要求 <code>--tier standard</code>。会发生什么？</li>
+  <li><strong>配置了 <code>model.vlm.server_url</code></strong>，但机器上没装任何本地 VLM 引擎。standard 能跑吗？</li>
+</ol>
+<p class="small muted">核对：场景 1–2 见 <a href="../reference/tier-matrix.html">档位矩阵</a> 的引擎表；场景 3 见“常见误区”；场景 4 见 <a href="../../../next/tiers.md">docs/next/tiers.md</a> 的“数据、模型与隐私”。</p>
+
+<h2 id="source">7. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../next/tiers.md">docs/next/tiers.md</a> — 档位语义、各入口默认规则、服务上限。</li>
+  <li>配合阅读：<a href="../../../../mineru/parser/tier.py">mineru/parser/tier.py</a>、<a href="../../../../mineru/model/vlm/selector.py">mineru/model/vlm/selector.py</a>、<a href="../../../../mineru/types.py">mineru/types.py</a>。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>回到 <a href="0001-trace-a-pdf.html">课程 01</a> 复述调用链，然后进入 Doclib 的状态线（下一课）。有任何不确定，直接问教师（agent）。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 02 · 参考：<a href="../reference/tier-matrix.html">档位矩阵</a> · <a href="../reference/glossary.html">术语表</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

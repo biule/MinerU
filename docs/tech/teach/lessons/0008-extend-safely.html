@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>课程 08：安全扩展清单 — MinerU 4.1</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<div class="page">
+
+<nav class="topnav">
+  <a href="0007-http-and-router.html">← 课程 07</a>
+  <a href="0009-debugging.html">课程 09 →</a>
+  <a href="../reference/architecture-map.html">架构地图</a>
+  <a href="../reference/tier-matrix.html">档位矩阵</a>
+  <a href="../reference/glossary.html">术语表</a>
+</nav>
+
+<p class="eyebrow">Lesson 08 · 综合</p>
+<h1>安全扩展清单</h1>
+<p class="lede">这节课把前七课串起来：给定四种典型改动（新格式 / 新渲染 / 新引擎 / 新服务 API），能列出完整改动点清单并通过护栏检查。</p>
+
+<div class="callout">
+  <strong>为什么学这个：</strong>这是使命的直接兑现——把 fork 改出定制能力，且不破坏现有行为。
+</div>
+
+<h2 id="seam">1. 先定位落点</h2>
+
+<div class="flow-h">
+  <div class="node dark"><strong>出题</strong>改什么、从哪个入口输入</div>
+  <div class="arrow-h"></div>
+  <div class="node accent"><strong>定位</strong>格式 → filetypes + analyze<br>推理 → model<br>输出 → render<br>状态 → doclib / tasks</div>
+  <div class="arrow-h"></div>
+  <div class="node"><strong>护栏</strong>不变量五查 → 测试三线</div>
+</div>
+
+<h2 id="format">2. 改动一：新增输入格式</h2>
+<ol>
+  <li>扩展名进入正确集合（<code>PARSEABLE / INGESTIBLE / DISCOVERABLE</code>，<code>filetypes.py</code>）；登记 MIME。</li>
+  <li>确定解析路径：<strong>原生格式只在 DocVortex 实现</strong>——需要先在 DocVortex 加分析器，MinerU 只登记与路由。</li>
+  <li><code>doc_analyze()</code> 加显式路由分支（<code>backend/analyze.py</code>）。</li>
+  <li>确认页范围边界（目前仅 PDF）、tier 归属（原生固定 flash）。</li>
+  <li>Doclib：入库、扫描、watch 自动生效（依赖扩展名集合）。</li>
+  <li>测试：单文件、批量、Doclib、API 四线 + 错误路径。</li>
+</ol>
+
+<h2 id="render">3. 改动二：新增渲染格式</h2>
+<ol>
+  <li><code>render/contracts.py</code>：加 <code>RenderFormat</code> 枚举与选项类。</li>
+  <li><code>render/api.py</code>：加分支、返回类型 overload、options 类型校验。</li>
+  <li><code>render/__init__.py</code>：显式导出 <code>__all__</code>。</li>
+  <li><strong>通用格式放 DocVortex</strong>；MinerU 只保留 Content List 类产品格式。</li>
+  <li>测试：结构、图片、公式定界符、空块、<code>asset_base_url</code>。</li>
+</ol>
+
+<h2 id="engine">4. 改动三：新增 VLM 引擎</h2>
+<ol>
+  <li><code>model/vlm/selector.py</code>：引擎名、后端映射、必需模块、auto 选择逻辑。</li>
+  <li><code>model/vlm/runtime.py</code>：构造分支 + 同级 close 逻辑；注意缓存键与单例语义。</li>
+  <li>权重格式不同则加 <code>ModelRepo</code>（<code>model/registry.py</code>）。</li>
+  <li><code>pyproject.toml</code>：可选 extra 与版本约束。</li>
+  <li>测试：同步 + 原生异步两条路径、释放、远程优先不回退本地的语义。</li>
+</ol>
+
+<h2 id="api">5. 改动四：新增 Doclib API</h2>
+<ol>
+  <li><code>doclib/types.py</code>：请求/响应模型。</li>
+  <li><code>doclib/services/</code>：服务实现（业务在 service，不在 route）。</li>
+  <li><code>doclib/server.py</code>：<code>@route(...)</code> 注册。</li>
+  <li><code>doclib/client.py</code>：同路径客户端方法（装饰器保持一致）。</li>
+  <li>测试：服务端 + 客户端契约、UDS/TCP 两种传输、错误码映射。</li>
+</ol>
+
+<h2 id="guardrails">6. 护栏五查（改完必过）</h2>
+<table>
+  <thead><tr><th>#</th><th>检查</th><th>依据</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>无隐式副作用：<code>import</code> 不读环境、不建目录、不注册、不加载重依赖</td><td><code>CLAUDE.md</code> 确定性优先 / 惰性加载</td></tr>
+    <tr><td>2</td><td>相对导入 + 显式 <code>__all__</code>；分派用显式映射</td><td><code>CLAUDE.md</code></td></tr>
+    <tr><td>3</td><td>隐私：<code>--remote</code> 上传必须有显式许可；存在配置 ≠ 许可</td><td><code>docs/next/invariants.md</code></td></tr>
+    <tr><td>4</td><td>协议：公开字段只走 MiddleJson；错误码不换含义；locator 保持可解析</td><td><code>invariants.md</code></td></tr>
+    <tr><td>5</td><td>生命周期：取消后迟到结果不改终态；启动失败也要清理已获资源</td><td><code>invariants.md</code></td></tr>
+  </tbody>
+</table>
+
+<h2 id="conventions">7. 工程约定（提交前）</h2>
+<pre><code># ruff 格式化，行宽 128；lint 规则 C/E/F/W/ANN（忽略 C901/ANN204/ANN401）
+# commit message 避免自动关 issue 关键词（fixes/closes/resolves #N）
+# 测试标记：torch / accelerator / e2e / smoke / slow / remote / full_stack
+#                                                        / isolated_home / lifecycle</code></pre>
+
+<h2 id="quiz">8. 检索练习</h2>
+
+<div class="quiz" data-explanation="原生格式解析归 DocVortex；MinerU 若复制第二份实现会破坏唯一归属边界。">
+  <h3>Q1. 新增原生格式解析器应写在哪里？</h3>
+  <button class="quiz-option">MinerU parser</button>
+  <button class="quiz-option">MinerU tasks</button>
+  <button class="quiz-option">MinerU render</button>
+  <button class="quiz-option" data-correct="true">DocVortex</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="护栏要求 import 无副作用、显式映射、不当注册，保证静态可追踪。">
+  <h3>Q2. 下列哪种写法违反护栏？</h3>
+  <button class="quiz-option">显式映射</button>
+  <button class="quiz-option">惰性导入</button>
+  <button class="quiz-option" data-correct="true">运行注册</button>
+  <button class="quiz-option">类型注解</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="护栏第五条：启动失败也要清理已获得资源，不因清理失败覆盖原始错误。">
+  <h3>Q3. 服务启动半途失败时应当？</h3>
+  <button class="quiz-option">直接退出</button>
+  <button class="quiz-option">静默忽略</button>
+  <button class="quiz-option" data-correct="true">清理资源</button>
+  <button class="quiz-option">自动重启</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<div class="quiz" data-explanation="Content List 是产品专属格式，放在 mineru/render/ 由 MinerU 维护。">
+  <h3>Q4. Content List V2 的实现归属是？</h3>
+  <button class="quiz-option" data-correct="true">MinerU</button>
+  <button class="quiz-option">DocVortex</button>
+  <button class="quiz-option">Tasks</button>
+  <button class="quiz-option">Doclib</button>
+  <p class="quiz-feedback" aria-live="polite"></p>
+</div>
+
+<h2 id="practice">9. 综合练习</h2>
+<ol>
+  <li><strong> Case：</strong>“支持 <code>.xlsx</code> 里的多工作表拆成多 page”——列出全部改动点与护栏检查结论。</li>
+  <li><strong>Case：</strong>“给 WebUI 加一个‘再解析一次’按钮”——哪个服务承担执行？需要什么 API 变更？会不会破坏缓存语义？</li>
+  <li><strong>Case：</strong>“新模型引擎想支持 AMD GPU”——引擎选择逻辑里需要动哪几行？auto 与显式选择的差别是什么？</li>
+</ol>
+<p class="small muted">建议把答案写成一份简短的改动计划发给教师（agent）复核。</p>
+
+<h2 id="source">10. 主源</h2>
+<ul>
+  <li><strong>首选：</strong><a href="../../../../CLAUDE.md">CLAUDE.md</a> — 工程约束与 DocVortex 边界的唯一说明。</li>
+  <li>配合阅读：<a href="../../../next/invariants.md">docs/next/invariants.md</a>、<a href="../../../next/code-map.md">docs/next/code-map.md</a>（改动落点定位）。</li>
+</ul>
+
+<div class="callout">
+  <strong>下一步：</strong>进入 <a href="0009-debugging.html">课程 09 · 排障手册</a>。动手改动前，把计划先过一遍“护栏五查”。
+</div>
+
+<p class="footer">MinerU 4.1.7 · 课程 08 · 参考：<a href="../reference/architecture-map.html">架构地图</a> · <a href="../reference/tier-matrix.html">档位矩阵</a></p>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
