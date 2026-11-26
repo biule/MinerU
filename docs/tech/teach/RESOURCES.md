@@ -42,8 +42,6 @@
   HTTP task protocol, Router, file-parse wrapper, Gradio UI. Use for: service integration.
 - [Project constraints: `CLAUDE.md`](../../../CLAUDE.md)
   Import rules, lazy loading, determinism, DocVortex boundary, lint/format policy. Use for: making changes that fit the codebase.
-- [3.x course archive: `docs/tech/teach-old/`](../teach-old/)
-  Previous 15-lesson course (MinerU 3.x). Use for: teaching structure, application scenarios, and finetune/evaluation/deployment framing. Do not use its APIs or engine names as 4.x facts.
 - [User-facing README (Chinese)](../../../README_zh-CN.md)
   Tiers, model-engine matrix, install paths, agent guidance. Use for: product-level framing and tier trade-offs.
 - [Official documentation](https://opendatalab.github.io/MinerU/)

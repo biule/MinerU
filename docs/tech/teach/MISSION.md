@@ -18,7 +18,6 @@ You maintain a fork of MinerU (`biule/MinerU`) and need to change its parsing pi
 - Chinese explanations preferred; source-level accuracy over marketing summaries.
 - Learns by reading code, diagrams, and printable references.
 - GitHub access is intermittent through a local proxy; lessons must not depend on live fetching.
-- `docs/tech/teach-old/` is a 3.x-era archive: useful for teaching structure and application scenarios, not a factual source for 4.x APIs.
 
 ## Out of scope
 - Training-framework internals and large-scale distributed training (serving and evaluating finetunes is in scope).

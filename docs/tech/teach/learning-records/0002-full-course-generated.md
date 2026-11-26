@@ -5,5 +5,3 @@ The base course (lessons 01–09) is authored and cross-linked per the teach ski
 **Status**: all quizzes are unattempted; no competency evidence yet beyond LR-0001.
 
 **Implications**: the next session should begin by confirming which lessons the user completed and collecting quiz/practice evidence. Lessons 08–09 (extension checklist, debugging) are the target zone: they require all prior lessons. Write a competency learning record (e.g. "can trace PDF call chain") only after the user demonstrates it — quoting an error code, explaining a stage, or correctly modifying something in the repo.
-
-**Update 2026-11-24**: the course was expanded to 17 lessons (13 runtime, 14 batch pipeline, 15 small-image OCR, 16 evaluation/quantization, 17 deployment) after comparing with the 3.x archive. See [LR-0003](0003-course-expansion-gap-analysis.md).
